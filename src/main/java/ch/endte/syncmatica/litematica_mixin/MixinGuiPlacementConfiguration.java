@@ -9,6 +9,7 @@ import ch.endte.syncmatica.communication.exchange.ModifyExchangeClient;
 import ch.endte.syncmatica.litematica.LitematicManager;
 import ch.endte.syncmatica.litematica.ScreenHelper;
 import ch.endte.syncmatica.litematica.gui.IGuiBase;
+import ch.endte.syncmatica.service.ThirdPartySyncService;
 import fi.dy.masa.litematica.gui.GuiPlacementConfiguration;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import fi.dy.masa.malilib.gui.GuiBase;
@@ -39,6 +40,12 @@ public abstract class MixinGuiPlacementConfiguration extends GuiBase {
         final List<ButtonBase> buttons = ((IGuiBase) this).getButtons();
         final ButtonBase button = buttons.get(6); // unlock button
         button.setActionListener((b, k) -> {
+            final Context context = LitematicManager.getInstance().getActiveContext();
+            final ThirdPartySyncService thirdParty = context.getThirdPartySyncService();
+            if (thirdParty != null && thirdParty.isThirdPartyMode()) {
+                toggleThirdPartyPlacement();
+                return;
+            }
             if (placement.isLocked()) {
                 requestModification();
             } else {
@@ -74,5 +81,22 @@ public abstract class MixinGuiPlacementConfiguration extends GuiBase {
         if (modifyExchange != null) {
             modifyExchange.conclude();
         }
+    }
+
+    @Unique
+    private void toggleThirdPartyPlacement() {
+        final Context context = LitematicManager.getInstance().getActiveContext();
+        final ThirdPartySyncService thirdParty = context.getThirdPartySyncService();
+        if (placement.isLocked()) {
+            placement.toggleLocked();
+            return;
+        }
+
+        final ServerPlacement serverPlacement = LitematicManager.getInstance().syncmaticFromSchematic(placement);
+        if (serverPlacement != null && thirdParty != null) {
+            LitematicManager.getInstance().updateServerPlacement(placement, serverPlacement);
+            thirdParty.sharePlacement(serverPlacement);
+        }
+        placement.toggleLocked();
     }
 }

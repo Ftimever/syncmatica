@@ -6,6 +6,7 @@ import ch.endte.syncmatica.communication.ClientCommunicationManager;
 import ch.endte.syncmatica.communication.ExchangeTarget;
 import ch.endte.syncmatica.communication.exchange.ShareLitematicExchange;
 import ch.endte.syncmatica.litematica.LitematicManager;
+import ch.endte.syncmatica.service.ThirdPartySyncService;
 
 import fi.dy.masa.malilib.gui.GuiBase;
 import fi.dy.masa.malilib.gui.Message;
@@ -27,10 +28,6 @@ public class ButtonListenerShare implements IButtonActionListener
     @Override
     public void actionPerformedWithButton(final ButtonBase button, final int mouseButton)
     {
-        if (LitematicManager.getInstance().isSyncmatic(schematicPlacement))
-        {
-            return;
-        }
         if (!GuiBase.isShiftDown())
         {
             messageDisplay.addMessage(Message.MessageType.ERROR, "syncmatica.error.share_without_shift");
@@ -38,10 +35,22 @@ public class ButtonListenerShare implements IButtonActionListener
         }
         button.setEnabled(false);
         final Context con = LitematicManager.getInstance().getActiveContext();
+        final ThirdPartySyncService thirdParty = con.getThirdPartySyncService();
+        if (thirdParty != null && thirdParty.isThirdPartyMode())
+        {
+            thirdParty.sharePlacement(schematicPlacement);
+            button.setEnabled(true);
+            return;
+        }
+        if (LitematicManager.getInstance().isSyncmatic(schematicPlacement))
+        {
+            return;
+        }
         final ExchangeTarget server = ((ClientCommunicationManager) con.getCommunicationManager()).getServer();
         if (!server.getFeatureSet().hasFeature(Feature.CORE_EX) && schematicPlacement.isRegionPlacementModified())
         {
             messageDisplay.addMessage(Message.MessageType.ERROR, "syncmatica.error.share_modified_subregions");
+            button.setEnabled(true);
             return;
         }
         final ShareLitematicExchange ex = new ShareLitematicExchange(schematicPlacement, server, con);

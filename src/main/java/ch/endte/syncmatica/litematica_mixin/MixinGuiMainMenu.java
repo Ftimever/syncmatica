@@ -4,6 +4,7 @@ import ch.endte.syncmatica.Context;
 import ch.endte.syncmatica.litematica.LitematicManager;
 import ch.endte.syncmatica.litematica.gui.ButtonListenerChangeMenu;
 import ch.endte.syncmatica.litematica.gui.MainMenuButtonType;
+import ch.endte.syncmatica.service.ThirdPartySyncService;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -23,9 +24,21 @@ public class MixinGuiMainMenu extends GuiBase {
         final int width = getButtonWidth();
         final int x = 52 + 2 * width;
         int y = 30;
-        createChangeMenuButton(x, y, width, MainMenuButtonType.VIEW_SYNCMATICS);
+        if (shouldShowProjectButton()) {
+            createChangeMenuButton(x, y, width, MainMenuButtonType.VIEW_SYNCMATICS);
+        }
         y += 22;
 //        createChangeMenuButton(x, y, width, MainMenuButtonType.MATERIAL_GATHERINGS).setEnabled(false);
+    }
+
+    @Unique
+    private boolean shouldShowProjectButton() {
+        final Context con = LitematicManager.getInstance().getActiveContext();
+        if (con == null) {
+            return true;
+        }
+        final ThirdPartySyncService thirdParty = con.getThirdPartySyncService();
+        return thirdParty == null || thirdParty.shouldShowProjectListEntry();
     }
 
     @Unique

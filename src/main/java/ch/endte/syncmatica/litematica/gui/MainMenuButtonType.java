@@ -9,7 +9,7 @@ import fi.dy.masa.malilib.util.StringUtils;
 
 public enum MainMenuButtonType implements IButtonType
 {
-    VIEW_SYNCMATICS("syncmatica.gui.button.view_syncmatics"),
+    VIEW_SYNCMATICS("syncmatica.gui.button.view_projects"),
 //    MATERIAL_GATHERINGS("syncmatica.gui.button.material_gatherings"),
     ;
 

@@ -4,7 +4,7 @@
 	"version": "${mod_version}",
 	"name": "Syncmatica",
 
-	"description": "Server-wide shared litematics.",
+	"description": "Client-side and legacy server shared Litematica projects.",
 	"authors": [
 		"nnnik",
 		"samipourquoi",

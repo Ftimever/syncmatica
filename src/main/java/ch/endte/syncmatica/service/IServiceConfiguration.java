@@ -12,4 +12,8 @@ public interface IServiceConfiguration {
     void loadInteger(String key, IntConsumer loader);
 
     void saveInteger(String key, Integer value);
+
+    void loadString(String key, Consumer<String> loader);
+
+    void saveString(String key, String value);
 }

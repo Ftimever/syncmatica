@@ -1,5 +1,6 @@
 package ch.endte.syncmatica.mixin;
 
+import ch.endte.syncmatica.Context;
 import java.util.Optional;
 import ch.endte.syncmatica.Reference;
 import ch.endte.syncmatica.Syncmatica;
@@ -46,5 +47,15 @@ public class MixinMinecraftClient
         // and when LM unloads/loads placements.
         Syncmatica.shutdown();
         LitematicManager.clear();
+    }
+
+    @Inject(method = "tick", at = @At("TAIL"))
+    private void syncmatica$thirdPartyTick(final CallbackInfo ci)
+    {
+        final Context context = Syncmatica.getContext(Syncmatica.CLIENT_CONTEXT);
+        if (context != null && context.getThirdPartySyncService() != null)
+        {
+            context.getThirdPartySyncService().clientTick();
+        }
     }
 }

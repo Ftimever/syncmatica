@@ -6,12 +6,15 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Collectors;
 import net.minecraft.core.BlockPos;
+import ch.endte.syncmatica.Context;
 import ch.endte.syncmatica.data.ServerPlacement;
 import ch.endte.syncmatica.data.ServerPosition;
 import ch.endte.syncmatica.litematica.LitematicManager;
 import ch.endte.syncmatica.litematica.ScreenHelper;
 import ch.endte.syncmatica.litematica.schematic.Schema;
 import ch.endte.syncmatica.litematica.schematic.SchematicSchema;
+import ch.endte.syncmatica.service.ThirdPartySyncService;
+import ch.endte.syncmatica.thirdparty.ThirdPartyProjectRecord;
 import ch.endte.syncmatica.util.SyncmaticaUtil;
 import com.google.common.collect.ImmutableList;
 import fi.dy.masa.malilib.gui.GuiBase;
@@ -145,9 +148,52 @@ public class WidgetListSyncmaticaServerPlacement extends WidgetListBase<ServerPl
             {
                 str = StringUtils.translate("syncmatica.gui.label.placement_info.schema", schema.getString(), version.minecraftDataVersion());
                 this.drawString(ctx, str, x, y, textColor);
-                //y += 12;
+                y += 12;
             }
         }
+
+        final Context context = LitematicManager.getInstance().getActiveContext();
+        final ThirdPartySyncService thirdParty = context != null ? context.getThirdPartySyncService() : null;
+        if (thirdParty != null && thirdParty.shouldShowProjectStatusInPlacementList())
+        {
+            final ThirdPartyProjectRecord record = thirdParty.getProjectForPlacement(placement);
+            if (record != null)
+            {
+                y += 4;
+                str = StringUtils.translate("syncmatica.gui.label.project_info.project_id");
+                this.drawString(ctx, str, x, y, textColor);
+                y += 12;
+                this.drawString(ctx, shortId(record.getProjectId()), x + 4, y, valueColor);
+                y += 12;
+
+                str = StringUtils.translate("syncmatica.gui.label.project_info.status");
+                this.drawString(ctx, str, x, y, textColor);
+                y += 12;
+                this.drawString(ctx, record.getStatus(), x + 4, y, valueColor);
+                y += 12;
+
+                str = StringUtils.translate("syncmatica.gui.label.project_info.updated_at");
+                this.drawString(ctx, str, x, y, textColor);
+                y += 12;
+                this.drawString(ctx, record.getUpdatedAt(), x + 4, y, valueColor);
+                y += 12;
+
+                str = StringUtils.translate("syncmatica.gui.label.project_info.local_collected");
+                this.drawString(ctx, str, x, y, textColor);
+                y += 12;
+                final int localCollected = record.getCollected().values().stream().mapToInt(Integer::intValue).sum();
+                this.drawString(ctx, Integer.toString(localCollected), x + 4, y, valueColor);
+            }
+        }
+    }
+
+    private String shortId(final String value)
+    {
+        if (value == null || value.length() <= 20)
+        {
+            return value == null ? "" : value;
+        }
+        return value.substring(0, 20);
     }
 
     @Override

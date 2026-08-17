@@ -11,6 +11,7 @@ import ch.endte.syncmatica.communication.ExchangeTarget;
 import ch.endte.syncmatica.data.LocalLitematicState;
 import ch.endte.syncmatica.data.ServerPlacement;
 import ch.endte.syncmatica.litematica.LitematicManager;
+import ch.endte.syncmatica.service.ThirdPartySyncService;
 import ch.endte.syncmatica.network.PacketType;
 import io.netty.buffer.Unpooled;
 import fi.dy.masa.malilib.gui.button.ButtonBase;
@@ -149,6 +150,12 @@ public class WidgetSyncmaticaServerPlacementEntry extends WidgetListEntryBase<Se
                         void onAction(final WidgetSyncmaticaServerPlacementEntry placement)
                         {
                             final Context con = LitematicManager.getInstance().getActiveContext();
+                            final ThirdPartySyncService thirdParty = con.getThirdPartySyncService();
+                            if (thirdParty != null && thirdParty.isThirdPartyMode())
+                            {
+                                thirdParty.forgetProject(placement.placement);
+                                return;
+                            }
                             final ExchangeTarget server = ((ClientCommunicationManager) con.getCommunicationManager()).getServer();
                             if (con.getCommunicationManager().getDownloadState(placement.placement))
                             {
@@ -170,6 +177,12 @@ public class WidgetSyncmaticaServerPlacementEntry extends WidgetListEntryBase<Se
                         void onAction(final WidgetSyncmaticaServerPlacementEntry placement)
                         {
                             final Context con = LitematicManager.getInstance().getActiveContext();
+                            final ThirdPartySyncService thirdParty = con.getThirdPartySyncService();
+                            if (thirdParty != null && thirdParty.isThirdPartyMode())
+                            {
+                                thirdParty.forgetProject(placement.placement);
+                                return;
+                            }
                             final ExchangeTarget server = ((ClientCommunicationManager) con.getCommunicationManager()).getServer();
                             final FriendlyByteBuf packetBuf = new FriendlyByteBuf(Unpooled.buffer());
                             packetBuf.writeUUID(placement.placement.getId());

@@ -13,7 +13,7 @@ public class GuiSyncmaticaServerPlacementList extends GuiListBase<ServerPlacemen
     public GuiSyncmaticaServerPlacementList()
     {
         super(12, 30);
-        title = StringUtils.translate("syncmatica.gui.title.manage_server_placements", String.format("v%s", Reference.MOD_VERSION));
+        title = StringUtils.translate("syncmatica.gui.title.manage_projects", String.format("v%s", Reference.MOD_VERSION));
     }
 
     @Override

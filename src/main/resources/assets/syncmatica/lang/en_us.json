@@ -1,5 +1,6 @@
 {
     "syncmatica.gui.button.view_syncmatics": "View Syncmatics",
+    "syncmatica.gui.button.view_projects": "Projects",
     "syncmatica.gui.button.material_gatherings": "Material Collections",
     "syncmatica.gui.button.load": "Load",
     "syncmatica.gui.button.unload": "Unload",
@@ -9,6 +10,7 @@
     "syncmatica.gui.button.share": "Share",
     "syncmatica.gui.button.material_gathering_placement": "Materials",
     "syncmatica.gui.title.manage_server_placements": "Manage Server Placements - %s",
+    "syncmatica.gui.title.manage_projects": "Manage Projects - %s",
     "syncmatica.gui.label.placement_info.display_name": "Name",
     "syncmatica.gui.label.placement_info.file_name": "File Name",
     "syncmatica.gui.label.placement_info.position": "Origin (xyz)",
@@ -17,13 +19,19 @@
     "syncmatica.gui.label.placement_info.last_modified": "Last modified by",
     "syncmatica.gui.label.placement_info.version": "Litematic Version: §f%d§r",
     "syncmatica.gui.label.placement_info.schema": "Minecraft: §f%s§r [Schema §f%d§r]",
+    "syncmatica.gui.label.project_info.project_id": "Project ID",
+    "syncmatica.gui.label.project_info.status": "Sync Status",
+    "syncmatica.gui.label.project_info.updated_at": "Updated At",
+    "syncmatica.gui.label.project_info.local_collected": "Local Collected",
     "syncmatica.error.share_without_shift": "Press shift to share",
     "syncmatica.error.share_modified_subregions": "Share Error - Connected Server does not support sharing of modified subregions - it needs to update.",
     "syncmatica.error.modification_deny": "Denied Modification request - Another user is already modifying this placement.",
     "syncmatica.error.player_dimension_mismatch": "Player needs to be in the same dimension as placement to load.",
+    "syncmatica.error.third_party_claim_conflict": "Claim conflict for {}. Refreshed third-party project state.",
     "syncmatica.error.create_from_schematic": "Error creating Syncmatic from schematic: {}",
     "syncmatica.error.share_incompatible_schematic": "Convert this file using the Schematic Manager from the main menu to share it",
     "syncmatica.error.invalid_file": "Cannot share this type of file",
     "syncmatica.error.failed_to_load": "Failed to load litematic {}",
-    "syncmatica.success.modification_accepted": "Modification request accept - Lock the placement again to share the results to the server"
+    "syncmatica.success.modification_accepted": "Modification request accept - Lock the placement again to share the results to the server",
+    "syncmatica.success.third_party_project_queued": "Queued project sync for {}"
 }

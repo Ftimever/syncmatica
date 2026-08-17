@@ -50,6 +50,23 @@ public class JsonConfiguration implements IServiceConfiguration {
         configuration.addProperty(key, value);
     }
 
+    @Override
+    public void loadString(final String key, final Consumer<String> loader) {
+        try {
+            final JsonElement elem = configuration.get(key);
+            if (elem != null) {
+                loader.accept(elem.getAsString());
+            }
+        } catch (final Exception ignored) {
+            wasError = true;
+        }
+    }
+
+    @Override
+    public void saveString(final String key, final String value) {
+        configuration.addProperty(key, value);
+    }
+
     public Boolean hadError() {
         return wasError;
     }

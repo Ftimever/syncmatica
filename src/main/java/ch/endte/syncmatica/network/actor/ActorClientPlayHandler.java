@@ -61,7 +61,11 @@ public class ActorClientPlayHandler
         final SyncmaticManager man = new SyncmaticManager();
         exTarget = new ExchangeTarget(clientPlayNetworkHandler);
         final CommunicationManager comms = new ClientCommunicationManager(exTarget);
-        Syncmatica.initClient(comms, data, man);
+        final var context = Syncmatica.initClient(comms, data, man);
+        if (context.getThirdPartySyncService() != null && context.getThirdPartySyncService().isThirdPartyMode())
+        {
+            context.startup();
+        }
         clientCommunication = comms;
         ScreenHelper.init();
         LitematicManager.getInstance().setActiveContext(Objects.requireNonNull(getContext(CLIENT_CONTEXT)));

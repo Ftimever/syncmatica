@@ -1,6 +1,8 @@
 # Syncmatica
 
 Syncmatica is a mod which aims to mod into litematica so that schematics and their placements can be easily shared.
+This branch also supports a client-side third-party project sync mode for collaborative stocking without requiring the
+server to install Syncmatica.
 
 ### Notice Please use with caution
 
@@ -35,10 +37,10 @@ See [Config Doku](https://github.com/End-Tech/syncmatica/blob/master/CONFIG.md) 
 
 ## Usage
 
-Once installed on your client, you can join every server normally. For servers which have Syncmatica installed you will
-get access to a few extra buttons. 2 of them are in the main menu and allow you to see the placements that are shared on
-the server and download them. Another is in your schematic placement overview and allows you to share your own
-litematics with the server.
+Once installed on your client, you can join every server normally. In the default third-party mode, the existing
+"Share" button keeps its name but creates or updates a project through the configured HTTP API. Player inventories,
+shulker contents, and container snapshots are only used locally for collection aggregation; only project-level collected
+material totals are uploaded. The legacy server mode remains available for older Syncmatica servers.
 
 You need to be in the same dimension as a syncmatic to load it.
 

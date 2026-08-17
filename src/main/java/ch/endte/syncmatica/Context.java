@@ -33,6 +33,7 @@ public class Context
     private boolean isStarted = false;
     private final QuotaService quota;
     private final DebugService debugService;
+    private final ThirdPartySyncService thirdPartySyncService;
     private final PlayerIdentifierProvider playerIdentifierProvider;
     private static boolean registerS2C = false;
     private static boolean registerC2S = false;
@@ -70,8 +71,18 @@ public class Context
         {
             quota = null;
         }
+        thirdPartySyncService = isServer ? null : new ThirdPartySyncService();
         playerIdentifierProvider = new PlayerIdentifierProvider(this);
         debugService = new DebugService();
+        if (quota != null)
+        {
+            quota.setContext(this);
+        }
+        debugService.setContext(this);
+        if (thirdPartySyncService != null)
+        {
+            thirdPartySyncService.setContext(this);
+        }
         this.litematicFolder = litematicFolder;
 //        if (!litematicFolder.exists())
         if (!Files.exists(litematicFolder))
@@ -114,6 +125,10 @@ public class Context
 
     public DebugService getDebugService() {
         return debugService;
+    }
+
+    public ThirdPartySyncService getThirdPartySyncService() {
+        return thirdPartySyncService;
     }
 
     public FeatureSet getFeatureSet() {
@@ -268,6 +283,9 @@ public class Context
         if (isServer()) {
             needsRewrite = loadConfigurationForService(quota, configuration, attemptToLoad);
         }
+        if (thirdPartySyncService != null) {
+            needsRewrite |= loadConfigurationForService(thirdPartySyncService, configuration, attemptToLoad);
+        }
         needsRewrite |= loadConfigurationForService(debugService, configuration, attemptToLoad);
         if (needsRewrite) {
             try (
@@ -327,6 +345,9 @@ public class Context
         {
             quota.startup();
         }
+        if (thirdPartySyncService != null) {
+            thirdPartySyncService.startup();
+        }
         debugService.startup();
     }
 
@@ -334,6 +355,9 @@ public class Context
         Syncmatica.debug("Context#shutdownServices()");
         if (quota != null) {
             quota.shutdown();
+        }
+        if (thirdPartySyncService != null) {
+            thirdPartySyncService.shutdown();
         }
         debugService.shutdown();
     }
