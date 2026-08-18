@@ -68,11 +68,25 @@ public class WidgetSyncmaticaServerPlacementEntry extends WidgetListEntryBase<Se
                 , () ->
                                      {
                                          final Context con = LitematicManager.getInstance().getActiveContext();
+                                         final ThirdPartySyncService service = con.getThirdPartySyncService();
+                                         if (service != null && service.isThirdPartyMode())
+                                         {
+                                             return !service.isPlacementDownloaded(placement);
+                                         }
                                          final LocalLitematicState state = con.getFileStorage().getLocalState(placement);
                                          return !state.isLocalFileReady() && state.isReadyForDownload();
                                      }, new ButtonListener(ButtonListener.Type.DOWNLOAD, this)));
         multi.add(new BaseButtonType("syncmatica.gui.button.load",
-                                     () -> !LitematicManager.getInstance().isRendered(placement),
+                                     () ->
+                                     {
+                                         final Context con = LitematicManager.getInstance().getActiveContext();
+                                         final ThirdPartySyncService service = con.getThirdPartySyncService();
+                                         if (service != null && service.isThirdPartyMode() && !service.isPlacementDownloaded(placement))
+                                         {
+                                             return false;
+                                         }
+                                         return !LitematicManager.getInstance().isRendered(placement);
+                                     },
                                      new ButtonListener(ButtonListener.Type.LOAD, this)));
         multi.add(new BaseButtonType("syncmatica.gui.button.unload",
                                      () -> LitematicManager.getInstance().isRendered(placement),
@@ -189,6 +203,11 @@ public class WidgetSyncmaticaServerPlacementEntry extends WidgetListEntryBase<Se
                             final ThirdPartySyncService thirdParty = con.getThirdPartySyncService();
                             if (thirdParty != null && thirdParty.isThirdPartyMode())
                             {
+                                if (!GuiBase.isShiftDown())
+                                {
+                                    ScreenHelper.ifPresent(screen -> screen.addMessage(Message.MessageType.WARNING, "syncmatica.error.delete_without_shift"));
+                                    return;
+                                }
                                 thirdParty.forgetProject(placement.placement);
                                 return;
                             }

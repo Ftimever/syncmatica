@@ -32,6 +32,9 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     private int selectedMaterialIndex;
     private int claimDraftAmount;
     private boolean claimSliderDragging;
+    private boolean pendingClaimOverride;
+    private String pendingClaimMaterialKey = "";
+    private int pendingClaimAmount;
 
     public GuiThirdPartyProjectDetails(final ThirdPartyProjectRecord record)
     {
@@ -125,6 +128,9 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     {
         if (isOverClaimSlider((int) event.x(), (int) event.y()))
         {
+            final ProjectMaterial material = selectedMaterial();
+            pendingClaimOverride = false;
+            pendingClaimMaterialKey = material == null ? "" : material.materialKey;
             claimSliderDragging = true;
             updateClaimDraftFromMouse((int) event.x());
             return true;
@@ -134,6 +140,8 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         if (row >= 0)
         {
             selectedMaterialIndex = row;
+            pendingClaimOverride = false;
+            pendingClaimMaterialKey = "";
             claimDraftAmount = currentClaimAmount(selectedMaterial());
             return true;
         }
@@ -216,9 +224,10 @@ public class GuiThirdPartyProjectDetails extends GuiBase
             drawString(ctx, trim(material.displayName, Math.max(12, (listWidth - 296) / 6)), x + 28, rowY + 4,
                     myClaim(material.materialKey) != null ? 0xFF77DD77 : 0xFFFFFFFF);
 
-            final int collected = record.getCollected().getOrDefault(material.materialKey, material.collected);
+            final int collected = collectedAmount(material);
+            final int reserved = previewReservedAmount(material);
             drawProgress(ctx, x + listWidth - 246, rowY + 3, 42, 12, collected, material.required);
-            drawMaterialCounts(ctx, material, collected, reservedAmount(material), x + listWidth - 196, rowY + 4);
+            drawMaterialCounts(ctx, material, collected, reserved, x + listWidth - 196, rowY + 4);
         }
     }
 
@@ -236,8 +245,8 @@ public class GuiThirdPartyProjectDetails extends GuiBase
             return;
         }
 
-        final int collected = record.getCollected().getOrDefault(material.materialKey, material.collected);
-        final int reserved = reservedAmount(material);
+        final int collected = collectedAmount(material);
+        final int reserved = previewReservedAmount(material);
         drawString(ctx, trim(material.displayName, 22), panelX + 10, panelY + 30, 0xFFFFFFFF);
         drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.missing") + ": "
                 + formatCount(Math.max(0, material.required - collected - reserved)), panelX + 10, panelY + 44, 0xFFFFD54F);
@@ -343,7 +352,7 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     {
         return record.getMaterials().stream()
                 .sorted(Comparator.comparingInt((ProjectMaterial material) ->
-                        Math.max(0, material.required - record.getCollected().getOrDefault(material.materialKey, material.collected))).reversed()
+                        Math.max(0, material.required - collectedAmount(material))).reversed()
                         .thenComparing(material -> material.displayName, String.CASE_INSENSITIVE_ORDER))
                 .toList();
     }
@@ -381,6 +390,15 @@ public class GuiThirdPartyProjectDetails extends GuiBase
 
     private int currentClaimAmount(final ProjectMaterial material)
     {
+        if (material != null && pendingClaimOverride && material.materialKey.equals(pendingClaimMaterialKey))
+        {
+            return pendingClaimAmount;
+        }
+        return recordClaimAmount(material);
+    }
+
+    private int recordClaimAmount(final ProjectMaterial material)
+    {
         final MaterialClaim claim = material == null ? null : myClaim(material.materialKey);
         return claim == null ? 0 : claim.targetAmount;
     }
@@ -391,7 +409,7 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         {
             return 0;
         }
-        final int collected = record.getCollected().getOrDefault(material.materialKey, material.collected);
+        final int collected = collectedAmount(material);
         final int myClaim = currentClaimAmount(material);
         return Math.max(0, material.required - collected - Math.max(0, reservedAmount(material) - myClaim));
     }
@@ -407,6 +425,28 @@ public class GuiThirdPartyProjectDetails extends GuiBase
             }
         }
         return Math.max(material.reserved, reserved);
+    }
+
+    private int collectedAmount(final ProjectMaterial material)
+    {
+        if (material == null)
+        {
+            return 0;
+        }
+        return Math.max(0, record.getCollected().getOrDefault(material.materialKey, 0));
+    }
+
+    private int previewReservedAmount(final ProjectMaterial material)
+    {
+        if (material == null)
+        {
+            return 0;
+        }
+        if ((claimSliderDragging || pendingClaimOverride) && material.materialKey.equals(pendingClaimMaterialKey))
+        {
+            return Math.max(0, reservedAmount(material) - recordClaimAmount(material) + claimDraftAmount);
+        }
+        return reservedAmount(material);
     }
 
     private boolean isOverClaimSlider(final int mouseX, final int mouseY)
@@ -438,13 +478,12 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         {
             return;
         }
+        pendingClaimOverride = true;
+        pendingClaimMaterialKey = material.materialKey;
+        pendingClaimAmount = claimDraftAmount;
         if (claimDraftAmount <= 0)
         {
-            final MaterialClaim claim = myClaim(material.materialKey);
-            if (claim != null)
-            {
-                service().cancelClaim(claim.claimId);
-            }
+            service().claimMaterial(record.getProjectId(), material.materialKey, 0);
             return;
         }
         service().claimMaterial(record.getProjectId(), material.materialKey, claimDraftAmount);

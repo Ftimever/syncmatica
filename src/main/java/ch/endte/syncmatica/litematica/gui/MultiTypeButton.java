@@ -5,6 +5,7 @@ import java.util.List;
 import fi.dy.masa.malilib.gui.button.ButtonBase;
 import fi.dy.masa.malilib.gui.button.ButtonGeneric;
 import fi.dy.masa.malilib.gui.button.IButtonActionListener;
+import fi.dy.masa.malilib.render.GuiContext;
 
 // Not sure how to add Icon support to this without a problematic implementation
 // Icon assumes final in its field - we cannot change the fact that the rendering probably
@@ -15,6 +16,7 @@ public class MultiTypeButton extends ButtonGeneric
 {
     IButtonType activeType;
     List<IButtonType> types;
+    private boolean hasActiveType;
 
     public MultiTypeButton(final int x, final int y, final boolean rightAligned, final List<IButtonType> types)
     {
@@ -39,7 +41,7 @@ public class MultiTypeButton extends ButtonGeneric
             final List<String> hoverStrings = activeType.getHoverStrings();
             setHoverStrings(hoverStrings.toArray(new String[0]));
         }
-        setEnabled(activeType.getButtonListener() != null);
+        setEnabled(hasActiveType && activeType.getButtonListener() != null);
     }
 
     private void updateType()
@@ -49,11 +51,13 @@ public class MultiTypeButton extends ButtonGeneric
             if (type.isActive())
             {
                 activeType = type;
+                hasActiveType = true;
                 return;
             }
         }
         // default type is 0
         activeType = types.get(0);
+        hasActiveType = false;
     }
 
     public IButtonType getActiveType()
@@ -108,5 +112,12 @@ public class MultiTypeButton extends ButtonGeneric
                 activeType.getButtonListener().actionPerformedWithButton(button, mouseButton);
             }
         }
+    }
+
+    @Override
+    public void render(final GuiContext ctx, final int mouseX, final int mouseY, final boolean selected)
+    {
+        update();
+        super.render(ctx, mouseX, mouseY, selected);
     }
 }

@@ -1,15 +1,20 @@
 package ch.endte.syncmatica.litematica.gui;
 
 import ch.endte.syncmatica.Context;
+import ch.endte.syncmatica.data.ServerPlacement;
 import ch.endte.syncmatica.litematica.LitematicManager;
+import ch.endte.syncmatica.litematica.ScreenHelper;
 import ch.endte.syncmatica.service.ThirdPartySyncService;
 import ch.endte.syncmatica.thirdparty.ThirdPartyProjectRecord;
 import fi.dy.masa.malilib.gui.GuiBase;
+import fi.dy.masa.malilib.gui.Message;
 import fi.dy.masa.malilib.gui.button.ButtonGeneric;
 import fi.dy.masa.malilib.gui.widgets.WidgetListEntryBase;
 import fi.dy.masa.malilib.render.GuiContext;
 import fi.dy.masa.malilib.render.RenderUtils;
 import fi.dy.masa.malilib.util.StringUtils;
+
+import java.util.ArrayList;
 
 public class WidgetThirdPartyProjectEntry extends WidgetListEntryBase<ThirdPartyProjectRecord>
 {
@@ -27,10 +32,27 @@ public class WidgetThirdPartyProjectEntry extends WidgetListEntryBase<ThirdParty
         final boolean downloaded = thirdParty != null && thirdParty.isProjectDownloaded(record);
 
         int posX = x + width - 2;
-        String text = StringUtils.translate("syncmatica.gui.button.details");
+        String text = StringUtils.translate("syncmatica.gui.button.remove");
         int len = getStringWidth(text) + 10;
         posX -= len;
         ButtonGeneric button = new ButtonGeneric(posX, y + 1, len, 20, text);
+        addButton(button, (b, mouseButton) -> {
+            if (thirdParty == null)
+            {
+                return;
+            }
+            if (!GuiBase.isShiftDown())
+            {
+                ScreenHelper.ifPresent(screen -> screen.addMessage(Message.MessageType.WARNING, "syncmatica.error.delete_without_shift"));
+                return;
+            }
+            thirdParty.forgetProject(record);
+        });
+
+        text = StringUtils.translate("syncmatica.gui.button.details");
+        len = getStringWidth(text) + 10;
+        posX -= len + 2;
+        button = new ButtonGeneric(posX, y + 1, len, 20, text);
         button.setEnabled(downloaded);
         addButton(button, (b, mouseButton) -> {
             final GuiThirdPartyProjectDetails gui = new GuiThirdPartyProjectDetails(record);
@@ -38,17 +60,24 @@ public class WidgetThirdPartyProjectEntry extends WidgetListEntryBase<ThirdParty
             GuiBase.openGui(gui);
         });
 
-        text = StringUtils.translate("syncmatica.gui.button.download");
-        len = getStringWidth(text) + 10;
-        posX -= len + 2;
-        button = new ButtonGeneric(posX, y + 1, len, 20, text);
-        button.setEnabled(record.getPlacement() != null && !downloaded);
-        addButton(button, (b, mouseButton) -> {
-            if (thirdParty != null)
-            {
-                thirdParty.downloadProjectSchematic(record);
-            }
-        });
+        final ArrayList<IButtonType> actionTypes = new ArrayList<>();
+        actionTypes.add(new BaseButtonType("syncmatica.gui.button.download",
+                () -> thirdParty != null && record.getPlacement() != null && !thirdParty.isProjectDownloaded(record),
+                (b, mouseButton) -> {
+                    if (thirdParty != null)
+                    {
+                        thirdParty.downloadProjectSchematic(record);
+                    }
+                }));
+        actionTypes.add(new BaseButtonType("syncmatica.gui.button.load",
+                () -> thirdParty != null && record.getPlacement() != null && thirdParty.isProjectDownloaded(record)
+                        && !LitematicManager.getInstance().isRendered(record.getPlacement()),
+                (b, mouseButton) -> LitematicManager.getInstance().renderSyncmatic(record.getPlacement())));
+        actionTypes.add(new BaseButtonType("syncmatica.gui.button.unload",
+                () -> record.getPlacement() != null && LitematicManager.getInstance().isRendered(record.getPlacement()),
+                (b, mouseButton) -> LitematicManager.getInstance().unrenderSyncmatic(record.getPlacement())));
+        posX -= 2;
+        addButton(new MultiTypeButton(posX, y + 1, true, actionTypes), null);
     }
 
     @Override
@@ -84,9 +113,10 @@ public class WidgetThirdPartyProjectEntry extends WidgetListEntryBase<ThirdParty
 
         final int missing = record.getMaterials().stream()
                 .mapToInt(material -> Math.max(0, material.required
-                        - record.getCollected().getOrDefault(material.materialKey, material.collected)
+                        - WidgetListThirdPartyProject.collectedAmount(record, material)
                         - WidgetListThirdPartyProject.reservedAmount(record, material.materialKey)))
                 .sum();
         return WidgetListThirdPartyProject.projectStage(record) + " / " + StringUtils.translate("syncmatica.gui.label.project_info.missing") + ": " + missing;
     }
+
 }

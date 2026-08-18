@@ -21,9 +21,7 @@ import com.google.gson.JsonObject;
 import fi.dy.masa.litematica.materials.MaterialListEntry;
 import fi.dy.masa.litematica.materials.MaterialListUtils;
 import fi.dy.masa.malilib.gui.Message;
-import fi.dy.masa.malilib.util.data.ItemType;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
-import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.core.BlockPos;
@@ -313,6 +311,8 @@ public class ThirdPartySyncService extends AbstractService
             {
                 record.setProjectKey(getRecordKey(record));
             }
+            record.getCollected().clear();
+            record.setPendingCollected(false);
             projects.put(record.getProjectKey(), record);
         }
         for (final ThirdPartyProjectRecord record : projects.values())
@@ -587,9 +587,51 @@ public class ThirdPartySyncService extends AbstractService
         {
             return;
         }
-        projects.remove(getLocalRecordKey(placement));
-        context.getSyncmaticManager().removePlacement(placement);
+        final ThirdPartyProjectRecord record = getProjectForPlacement(placement);
+        forgetProject(record);
+    }
+
+    public synchronized void forgetProject(final ThirdPartyProjectRecord record)
+    {
+        if (record == null)
+        {
+            return;
+        }
+        final ServerPlacement placement = record.getPlacement();
+        if (placement != null)
+        {
+            LitematicManager.getInstance().unrenderSyncmatic(placement);
+            try
+            {
+                Files.deleteIfExists(syncCachePath(placement));
+            }
+            catch (final Exception e)
+            {
+                Syncmatica.LOGGER.warn("Failed to delete third-party sync cache for '{}': {}", placement.getName(), e.getLocalizedMessage());
+            }
+            context.getSyncmaticManager().removePlacement(placement);
+        }
+        projects.remove(getRecordKey(record));
+        projects.remove(remoteRecordKey(record.getProjectId()));
+        if (placement != null)
+        {
+            projects.remove(getLocalRecordKey(placement));
+        }
         saveProjects();
+        showMessage(Message.MessageType.SUCCESS, "syncmatica.success.third_party_project_removed", recordDisplayName(record));
+    }
+
+    private String recordDisplayName(final ThirdPartyProjectRecord record)
+    {
+        if (record == null)
+        {
+            return "";
+        }
+        if (record.getPlacement() != null)
+        {
+            return record.getPlacement().getName();
+        }
+        return record.getProject().name == null || record.getProject().name.isBlank() ? record.getProjectId() : record.getProject().name;
     }
 
     public void refreshProjects()
@@ -755,15 +797,16 @@ public class ThirdPartySyncService extends AbstractService
                 final List<MaterialClaim> existingClaims = findClaims(record, materialKey, currentPlayerName());
                 final int existingAmount = existingClaims.stream().mapToInt(claim -> claim.targetAmount).sum();
                 final int amount = resolveClaimAmount(record, materialKey, requestedAmount, existingAmount);
-                if (amount <= 0 && !allowClaimOverRemaining)
+                if (amount <= 0)
                 {
                     for (final MaterialClaim claim : existingClaims)
                     {
                         record.removeClaim(claim.claimId);
                         try
                         {
-                            apiClient.deleteClaim(claim.claimId);
+                            final JsonObject response = apiClient.deleteClaim(claim.claimId);
                             notifyThirdPartyConnectionSucceeded();
+                            record.mergeProjectDetails(response);
                         }
                         catch (final Exception e)
                         {
@@ -807,6 +850,10 @@ public class ThirdPartySyncService extends AbstractService
                     final JsonObject response = apiClient.upsertClaim(projectId, body);
                     notifyThirdPartyConnectionSucceeded();
                     record.mergeProjectDetails(response);
+                    for (int i = 1; i < existingClaims.size(); i++)
+                    {
+                        record.mergeProjectDetails(apiClient.deleteClaim(existingClaims.get(i).claimId));
+                    }
                 }
                 catch (final Exception e)
                 {
@@ -841,11 +888,19 @@ public class ThirdPartySyncService extends AbstractService
             {
                 try
                 {
-                    apiClient.deleteClaim(claimId);
+                    final JsonObject response = apiClient.deleteClaim(claimId);
                     notifyThirdPartyConnectionSucceeded();
                     for (final ThirdPartyProjectRecord record : projects.values())
                     {
-                        record.removeClaim(claimId);
+                        if (response.has("projectId") && record.getProjectId().equals(readString(response, "projectId")))
+                        {
+                            record.mergeProjectDetails(response);
+                        }
+                        else
+                        {
+                            record.removeClaim(claimId);
+                            recomputeMaterialReserved(record);
+                        }
                     }
                 }
                 catch (final Exception e)
@@ -947,7 +1002,7 @@ public class ThirdPartySyncService extends AbstractService
                         created.displayName = material.displayName;
                         return created;
                     });
-                    final int collectedAmount = record.getCollected().getOrDefault(material.materialKey, material.collected);
+                    final int collectedAmount = collectedAmount(record, material);
                     final int reservedAmount = reservedAmount(record, material);
                     entry.required += material.required;
                     entry.collected += collectedAmount;
@@ -1292,7 +1347,7 @@ public class ThirdPartySyncService extends AbstractService
             return;
         }
 
-        final Object2IntOpenHashMap<ItemType> playerCounts = includePlayerInventory ? countPlayerInventory(mc.player) : new Object2IntOpenHashMap<>();
+        final Map<String, Integer> playerCounts = includePlayerInventory ? countPlayerInventory(mc.player) : Collections.emptyMap();
         final List<ThirdPartyProjectRecord> snapshot;
         synchronized (this)
         {
@@ -1391,37 +1446,20 @@ public class ThirdPartySyncService extends AbstractService
         return matches;
     }
 
-    private Object2IntOpenHashMap<ItemType> countPlayerInventory(final Player player)
+    private Map<String, Integer> countPlayerInventory(final Player player)
     {
-        final Object2IntOpenHashMap<ItemType> counts = new Object2IntOpenHashMap<>();
         if (player == null)
         {
-            return counts;
+            return Collections.emptyMap();
         }
 
         final Inventory inventory = player.getInventory();
         if (inventory == null)
         {
-            return counts;
+            return Collections.emptyMap();
         }
 
-        if (includeShulkerContents)
-        {
-            counts.putAll(MaterialListUtils.getInventoryItemCounts(inventory));
-        }
-        else
-        {
-            for (int i = 0; i < inventory.getContainerSize(); i++)
-            {
-                final ItemStack stack = inventory.getItem(i);
-                if (!stack.isEmpty())
-                {
-                    counts.addTo(new ItemType(stack, true, false), stack.getCount());
-                }
-            }
-        }
-
-        return counts;
+        return countInventory(inventory);
     }
 
     private Map<String, Integer> countInventory(final Inventory inventory)
@@ -1493,37 +1531,6 @@ public class ThirdPartySyncService extends AbstractService
             return exact;
         }
         return counts.getOrDefault(material.itemId, 0);
-    }
-
-    private int countMaterialAmount(final Object2IntOpenHashMap<ItemType> counts, final ProjectMaterial material)
-    {
-        if (counts == null || material == null || material.itemId == null || material.itemId.isBlank())
-        {
-            return 0;
-        }
-
-        final ItemStack materialStack = stackForItemId(material.itemId);
-        if (materialStack.isEmpty())
-        {
-            return 0;
-        }
-
-        final int exact = counts.getInt(new ItemType(materialStack, true, false));
-        if (exact > 0)
-        {
-            return exact;
-        }
-
-        int amount = 0;
-        for (final ItemType type : counts.keySet())
-        {
-            final ItemStack stack = type.getStack();
-            if (!stack.isEmpty() && material.itemId.equals(itemId(stack)))
-            {
-                amount += counts.getInt(type);
-            }
-        }
-        return amount;
     }
 
     private boolean isDefaultComponentMaterial(final ProjectMaterial material)
@@ -1830,8 +1837,10 @@ public class ThirdPartySyncService extends AbstractService
 
             if (record.isPendingCollected() && !record.getProjectId().isBlank() && isParticipating(record))
             {
-                apiClient.uploadCollected(record.getProjectId(), createCollectedBody(record));
+                final JsonObject response = apiClient.uploadCollected(record.getProjectId(), createCollectedBody(record));
                 notifyThirdPartyConnectionSucceeded();
+                record.mergeProjectDetails(response);
+                mergeServerPlacement(record, response);
                 record.setPendingCollected(false);
                 record.setStatus(ThirdPartyProjectRecord.STATUS_SYNCED);
                 record.setLastSyncMessage("");
@@ -2113,7 +2122,7 @@ public class ThirdPartySyncService extends AbstractService
 
     private int resolveClaimAmount(final ThirdPartyProjectRecord record, final String materialKey, final int requestedAmount, final int existingAmount)
     {
-        if (requestedAmount > 0)
+        if (requestedAmount >= 0)
         {
             final int editableMaximum = getRemainingClaimable(record, materialKey) + Math.max(0, existingAmount);
             return allowClaimOverRemaining ? requestedAmount : Math.min(requestedAmount, editableMaximum);
@@ -2183,10 +2192,19 @@ public class ThirdPartySyncService extends AbstractService
         {
             if (material.materialKey.equals(materialKey))
             {
-                return Math.max(0, material.required - material.collected - reservedAmount(record, material));
+                return Math.max(0, material.required - collectedAmount(record, material) - reservedAmount(record, material));
             }
         }
         return 0;
+    }
+
+    private int collectedAmount(final ThirdPartyProjectRecord record, final ProjectMaterial material)
+    {
+        if (record == null || material == null)
+        {
+            return 0;
+        }
+        return Math.max(0, record.getCollected().getOrDefault(material.materialKey, 0));
     }
 
     private int reservedAmount(final ThirdPartyProjectRecord record, final ProjectMaterial material)
@@ -2200,6 +2218,27 @@ public class ThirdPartySyncService extends AbstractService
             }
         }
         return Math.max(material.reserved, amount);
+    }
+
+    private void recomputeMaterialReserved(final ThirdPartyProjectRecord record)
+    {
+        if (record == null)
+        {
+            return;
+        }
+        for (final ProjectMaterial material : record.getMaterials())
+        {
+            int amount = 0;
+            for (final MaterialClaim claim : record.getClaims())
+            {
+                if (claim.materialKey.equals(material.materialKey))
+                {
+                    amount += claim.targetAmount;
+                }
+            }
+            material.reserved = amount;
+            material.missing = Math.max(0, material.required - collectedAmount(record, material) - material.reserved);
+        }
     }
 
     private List<MaterialClaim> findClaims(final ThirdPartyProjectRecord record, final String materialKey, final String playerName)
@@ -2300,7 +2339,13 @@ public class ThirdPartySyncService extends AbstractService
         final JsonArray result = new JsonArray();
         for (final ProjectMaterial material : materials)
         {
-            result.add(material.toJson());
+            final JsonObject obj = new JsonObject();
+            obj.addProperty("materialKey", material.materialKey);
+            obj.addProperty("itemId", material.itemId);
+            obj.addProperty("nbtHash", material.nbtHash);
+            obj.addProperty("displayName", material.displayName);
+            obj.addProperty("required", material.required);
+            result.add(obj);
         }
         return result;
     }

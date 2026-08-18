@@ -89,8 +89,8 @@ function normalizeMaterial(material) {
     nbtHash: String(material.nbtHash || ""),
     displayName: String(material.displayName || material.itemId || material.materialKey || ""),
     required,
-    collected: Number(material.collected || 0),
-    reserved: Number(material.reserved || 0),
+    collected: 0,
+    reserved: 0,
     missing: Number(material.missing || required)
   };
 }
@@ -133,7 +133,9 @@ function recompute(project) {
   }
 
   for (const material of project.materials) {
-    const collected = Number(project.collected[material.materialKey] || material.collected || 0);
+    const collected = Object.prototype.hasOwnProperty.call(project.collected, material.materialKey)
+      ? Number(project.collected[material.materialKey] || 0)
+      : 0;
     const reservedAmount = reserved.get(material.materialKey) || 0;
     material.collected = collected;
     material.reserved = reservedAmount;

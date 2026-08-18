@@ -101,7 +101,7 @@ public class LitematicManager
             final UUID smId = eventHandler.getServerId(sm);
             if (smId != null && smId.equals(p.getId()))
             {
-                if (!rendering.containsKey(p))
+                if (!isRendered(p))
                 {
                     rendering.put(p, sm);
                     ((RedirectFileStorage) context.getFileStorage()).addRedirect(sm.getSchematicFile());
@@ -128,7 +128,7 @@ public class LitematicManager
             context.getSyncmaticManager().updateServerPlacement(placement);
             return;
         }
-        if (rendering.containsKey(placement))
+        if (isRendered(placement))
         {
             return;
         }
@@ -309,7 +309,7 @@ public class LitematicManager
 
     public SchematicPlacement schematicFromSyncmatic(final ServerPlacement p)
     {
-        return rendering.get(p);
+        return getRenderedPlacement(p);
     }
 
     // 3rd case litematic placement is loaded from file at startup or because the syncmatic got created from
@@ -317,7 +317,7 @@ public class LitematicManager
     // and the server gives confirmation that the schematic exists
     public void renderSyncmatic(final ServerPlacement placement, final SchematicPlacement litematicaPlacement, final boolean addToRendering)
     {
-        if (rendering.containsKey(placement))
+        if (isRendered(placement))
         {
             return;
         }
@@ -364,22 +364,25 @@ public class LitematicManager
 
     public void unrenderSyncmatic(final ServerPlacement placement)
     {
-        if (!isRendered(placement))
+        final ServerPlacement renderedKey = getRenderedKey(placement);
+        if (renderedKey == null)
         {
             return;
         }
-        DataManager.getSchematicPlacementManager().removeSchematicPlacement(rendering.get(placement));
-        rendering.remove(placement);
-        context.getSyncmaticManager().updateServerPlacement(placement);
+        final SchematicPlacement renderedPlacement = rendering.get(renderedKey);
+        DataManager.getSchematicPlacementManager().removeSchematicPlacement(renderedPlacement);
+        rendering.remove(renderedKey);
+        context.getSyncmaticManager().updateServerPlacement(renderedKey);
     }
 
     public void updateRendered(final ServerPlacement placement)
     {
-        if (!isRendered(placement))
+        final ServerPlacement renderedKey = getRenderedKey(placement);
+        if (renderedKey == null)
         {
             return;
         }
-        final SchematicPlacement litematicaPlacement = rendering.get(placement);
+        final SchematicPlacement litematicaPlacement = rendering.get(renderedKey);
         final boolean wasLocked = litematicaPlacement.isLocked();
         if (wasLocked)
         {
@@ -408,7 +411,29 @@ public class LitematicManager
 
     public boolean isRendered(final ServerPlacement placement)
     {
-        return rendering.containsKey(placement);
+        return getRenderedKey(placement) != null;
+    }
+
+    private @Nullable ServerPlacement getRenderedKey(final ServerPlacement placement)
+    {
+        if (placement == null)
+        {
+            return null;
+        }
+        for (final ServerPlacement rendered : rendering.keySet())
+        {
+            if (rendered.getId().equals(placement.getId()))
+            {
+                return rendered;
+            }
+        }
+        return null;
+    }
+
+    private @Nullable SchematicPlacement getRenderedPlacement(final ServerPlacement placement)
+    {
+        final ServerPlacement key = getRenderedKey(placement);
+        return key != null ? rendering.get(key) : null;
     }
 
     public boolean isSyncmatic(final SchematicPlacement schem)

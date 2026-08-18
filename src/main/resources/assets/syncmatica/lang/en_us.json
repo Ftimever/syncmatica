@@ -54,6 +54,7 @@
     "syncmatica.gui.label.project_download.downloaded": "Joined",
     "syncmatica.gui.label.project_download.download_to_join": "Download the schematic to view materials, claim, and sync collected data",
     "syncmatica.error.share_without_shift": "Press shift to share",
+    "syncmatica.error.delete_without_shift": "Hold Shift to delete safely",
     "syncmatica.error.share_modified_subregions": "Share Error - Connected Server does not support sharing of modified subregions - it needs to update.",
     "syncmatica.error.modification_deny": "Denied Modification request - Another user is already modifying this placement.",
     "syncmatica.error.player_dimension_mismatch": "Player needs to be in the same dimension as placement to load.",
@@ -70,6 +71,7 @@
     "syncmatica.success.third_party_connected": "Connected to third-party server: {}",
     "syncmatica.success.third_party_schematic_downloaded": "Downloaded and loaded third-party schematic: {}",
     "syncmatica.success.third_party_project_queued": "Queued project sync for {}",
+    "syncmatica.success.third_party_project_removed": "Removed local project cache: {}",
     "syncmatica.success.storage_zone_corner_set": "Set storage zone corner {} to {}",
     "syncmatica.success.storage_zone_saved": "Saved storage zone for {}"
 }

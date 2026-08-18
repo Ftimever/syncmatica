@@ -125,7 +125,7 @@ public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjec
                 break;
             }
             drawString(ctx, shortValue(material.displayName, 20), x + 2, y, value);
-            final int collected = record.getCollected().getOrDefault(material.materialKey, material.collected);
+            final int collected = collectedAmount(record, material);
             final int reserved = reservedAmount(record, material.materialKey);
             drawString(ctx, collected + "/" + reserved + "/" + material.required, x + 120, y, collected >= material.required ? 0xFF55FF55 : 0xFFFFD54F);
             y += 12;
@@ -220,7 +220,7 @@ public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjec
         boolean allCovered = true;
         for (final ProjectMaterial material : record.getMaterials())
         {
-            final int collected = record.getCollected().getOrDefault(material.materialKey, material.collected);
+            final int collected = collectedAmount(record, material);
             final int reserved = reservedAmount(record, material.materialKey);
             if (collected < material.required)
             {
@@ -262,6 +262,15 @@ public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjec
             }
         }
         return amount;
+    }
+
+    static int collectedAmount(final ThirdPartyProjectRecord record, final ProjectMaterial material)
+    {
+        if (record == null || material == null)
+        {
+            return 0;
+        }
+        return Math.max(0, record.getCollected().getOrDefault(material.materialKey, 0));
     }
 
     static String participantsText(final ThirdPartyProjectRecord record)
