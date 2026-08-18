@@ -11,7 +11,8 @@
 		"MixinGuiBase",
 		"MixinButtonBase",
 		"MixinWidgetSchematicPlacement",
-		"MixinGuiPlacementConfiguration"
+		"MixinGuiPlacementConfiguration",
+		"MixinGuiConfigs"
 	],
 	"server": [],
 	"injectors": {

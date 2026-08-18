@@ -14,6 +14,7 @@ import fi.dy.masa.malilib.render.GuiContext;
 import fi.dy.masa.malilib.render.RenderUtils;
 import fi.dy.masa.malilib.util.StringUtils;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
@@ -28,6 +29,9 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     private final ThirdPartyProjectRecord record;
     private BlockPos firstCorner;
     private BlockPos secondCorner;
+    private int selectedMaterialIndex;
+    private int claimDraftAmount;
+    private boolean claimSliderDragging;
 
     public GuiThirdPartyProjectDetails(final ThirdPartyProjectRecord record)
     {
@@ -39,6 +43,16 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     public void initGui()
     {
         super.initGui();
+        final ThirdPartySyncService service = service();
+        if (service == null || !service.isProjectDownloaded(record))
+        {
+            addMessage(Message.MessageType.WARNING, "syncmatica.error.third_party_project_not_downloaded");
+            GuiBase.openGui(getParent());
+            return;
+        }
+        service.recomputeLocalCollectedNow();
+        selectedMaterialIndex = clampSelectedMaterialIndex(selectedMaterialIndex);
+        claimDraftAmount = currentClaimAmount(selectedMaterial());
         int x = 10;
         final int y = height - 26;
 
@@ -51,7 +65,10 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         label = StringUtils.translate("syncmatica.gui.button.refresh_projects");
         buttonWidth = getStringWidth(label) + 20;
         button = new ButtonGeneric(x, y, buttonWidth, 20, label);
-        addButton(button, (b, mouseButton) -> service().refreshProjectDetails(record));
+        addButton(button, (b, mouseButton) -> {
+            service().recomputeLocalCollectedNow();
+            service().refreshProjectDetails(record);
+        });
         x += buttonWidth + 4;
 
         label = StringUtils.translate("syncmatica.gui.button.zone_corner_a");
@@ -85,83 +102,109 @@ public class GuiThirdPartyProjectDetails extends GuiBase
             addMessage(Message.MessageType.SUCCESS, "syncmatica.success.storage_zone_saved", WidgetListThirdPartyProject.projectName(record));
         });
 
-        addMaterialButtons();
+        addMaterialActions();
     }
 
-    private void addMaterialButtons()
+    private void addMaterialActions()
     {
-        int y = 108;
-        final int claimX = width - 168;
-        final int cancelX = width - 84;
-        final List<ProjectMaterial> materials = sortedMaterials();
-        final int rows = Math.min(12, materials.size());
-        for (int i = 0; i < rows; i++)
-        {
-            final ProjectMaterial material = materials.get(i);
-            String label = StringUtils.translate("syncmatica.gui.button.claim");
-            ButtonGeneric button = new ButtonGeneric(claimX, y, 78, 20, label);
-            addButton(button, (b, mouseButton) -> service().claimMaterial(record.getProjectId(), material.materialKey, 0));
-
-            label = StringUtils.translate("syncmatica.gui.button.cancel_claim");
-            button = new ButtonGeneric(cancelX, y, 78, 20, label);
-            addButton(button, (b, mouseButton) -> {
-                final MaterialClaim claim = myClaim(material.materialKey);
-                if (claim != null)
-                {
-                    service().cancelClaim(claim.claimId);
-                }
-            });
-            y += 22;
-        }
+        // The claim amount is controlled by the slider drawn in drawMaterialActions().
     }
 
     @Override
     protected void drawContents(final GuiContext ctx, final int mouseX, final int mouseY, final float partialTicks)
     {
-        super.drawContents(ctx, mouseX, mouseY, partialTicks);
         drawProjectHeader(ctx);
         drawMaterialRows(ctx);
+        drawMaterialActions(ctx);
         drawZones(ctx);
+        drawButtons(ctx, mouseX, mouseY, partialTicks);
+    }
+
+    @Override
+    public boolean onMouseClicked(final MouseButtonEvent event, final boolean onCurrentScreen)
+    {
+        if (isOverClaimSlider((int) event.x(), (int) event.y()))
+        {
+            claimSliderDragging = true;
+            updateClaimDraftFromMouse((int) event.x());
+            return true;
+        }
+
+        final int row = materialRowAt((int) event.x(), (int) event.y());
+        if (row >= 0)
+        {
+            selectedMaterialIndex = row;
+            claimDraftAmount = currentClaimAmount(selectedMaterial());
+            return true;
+        }
+        return super.onMouseClicked(event, onCurrentScreen);
+    }
+
+    @Override
+    public boolean onMouseDragged(final MouseButtonEvent event, final double deltaX, final double deltaY)
+    {
+        if (claimSliderDragging)
+        {
+            updateClaimDraftFromMouse((int) event.x());
+            return true;
+        }
+        return super.onMouseDragged(event, deltaX, deltaY);
+    }
+
+    @Override
+    public boolean onMouseReleased(final MouseButtonEvent event)
+    {
+        if (claimSliderDragging)
+        {
+            claimSliderDragging = false;
+            applyClaimDraft();
+            return true;
+        }
+        return super.onMouseReleased(event);
     }
 
     private void drawProjectHeader(final GuiContext ctx)
     {
         int x = 10;
         int y = 24;
-        RenderUtils.drawOutlinedBox(ctx, x, y, width - 20, 58, 0xA0000000, COLOR_HORIZONTAL_BAR);
+        RenderUtils.drawOutlinedBox(ctx, x, y, width - 20, 60, 0xA0000000, COLOR_HORIZONTAL_BAR);
         x += 6;
         y += 6;
         drawString(ctx, StringUtils.translate("syncmatica.gui.label.placement_info.display_name") + ": " + WidgetListThirdPartyProject.projectName(record), x, y, 0xFFFFFFFF);
         y += 12;
-        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.project_id") + ": " + record.getProjectId(), x, y, 0xFFC0C0C0);
-        y += 12;
-        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.status") + ": " + record.getStatus()
-                + "    " + StringUtils.translate("syncmatica.gui.label.project_info.updated_at") + ": " + record.getUpdatedAt(), x, y, 0xFFC0C0C0);
-        y += 12;
         drawString(ctx, StringUtils.translate("syncmatica.gui.label.placement_info.dimension_id") + ": " + record.getProject().dimension
                 + "    " + StringUtils.translate("syncmatica.gui.label.placement_info.position") + ": "
                 + record.getProject().originX + " " + record.getProject().originY + " " + record.getProject().originZ, x, y, 0xFFC0C0C0);
+        y += 12;
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.status") + ": " + WidgetListThirdPartyProject.projectStage(record)
+                + "    " + StringUtils.translate("syncmatica.gui.label.project_info.updated_at") + ": " + record.getUpdatedAt(), x, y, 0xFFC0C0C0);
+        y += 12;
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.project_id") + ": " + trim(record.getProjectId(), 56), x, y, 0xFF909090);
     }
 
     private void drawMaterialRows(final GuiContext ctx)
     {
         final int x = 10;
-        int y = 88;
-        final int listWidth = width - 188;
-        RenderUtils.drawOutlinedBox(ctx, x, y - 4, width - 20, 286, 0xA0000000, COLOR_HORIZONTAL_BAR);
+        int y = materialListY();
+        final int listWidth = materialListWidth();
+        RenderUtils.drawOutlinedBox(ctx, x, y - 4, listWidth, materialListHeight(), 0xA0000000, COLOR_HORIZONTAL_BAR);
         drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.materials"), x + 6, y, 0xFFFFFFFF);
-        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.counts"), x + listWidth - 126, y, 0xFFFFFFFF);
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.counts"), x + listWidth - 196, y, 0xFFFFFFFF);
         y += 20;
 
         final List<ProjectMaterial> materials = sortedMaterials();
-        final int rows = Math.min(12, materials.size());
+        final int rows = visibleMaterialRows();
         for (int i = 0; i < rows; i++)
         {
             final ProjectMaterial material = materials.get(i);
             final int rowY = y + i * 22;
+            if (i == selectedMaterialIndex)
+            {
+                RenderUtils.drawRect(ctx, x + 2, rowY - 2, listWidth - 4, 20, 0x40457B9D);
+            }
             if ((i & 1) == 1)
             {
-                RenderUtils.drawRect(ctx, x + 2, rowY - 2, width - 24, 20, 0x20101010);
+                RenderUtils.drawRect(ctx, x + 2, rowY - 2, listWidth - 4, 20, 0x20101010);
             }
 
             final ItemStack stack = itemStackFor(material.itemId);
@@ -170,17 +213,113 @@ public class GuiThirdPartyProjectDetails extends GuiBase
             {
                 ctx.renderItem(stack, x + 6, rowY);
             }
-            drawString(ctx, trim(material.displayName, 34), x + 28, rowY + 4, 0xFFFFFFFF);
+            drawString(ctx, trim(material.displayName, Math.max(12, (listWidth - 296) / 6)), x + 28, rowY + 4,
+                    myClaim(material.materialKey) != null ? 0xFF77DD77 : 0xFFFFFFFF);
 
             final int collected = record.getCollected().getOrDefault(material.materialKey, material.collected);
-            drawString(ctx, String.valueOf(collected), x + listWidth - 126, rowY + 4, collected >= material.required ? 0xFF55FF55 : 0xFFFFD54F);
-            drawString(ctx, "/" + material.reserved + "/" + material.required, x + listWidth - 96, rowY + 4, 0xFFE0E0E0);
-            final MaterialClaim claim = myClaim(material.materialKey);
-            if (claim != null)
+            drawProgress(ctx, x + listWidth - 246, rowY + 3, 42, 12, collected, material.required);
+            drawMaterialCounts(ctx, material, collected, reservedAmount(material), x + listWidth - 196, rowY + 4);
+        }
+    }
+
+    private void drawMaterialActions(final GuiContext ctx)
+    {
+        final int panelX = operationPanelX();
+        final int panelY = materialListY() - 4;
+        RenderUtils.drawOutlinedBox(ctx, panelX, panelY, 166, materialListHeight(), 0xA0000000, COLOR_HORIZONTAL_BAR);
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.claims"), panelX + 10, panelY + 8, 0xFFFFFFFF);
+
+        final ProjectMaterial material = selectedMaterial();
+        if (material == null)
+        {
+            drawString(ctx, "-", panelX + 10, panelY + 30, 0xFFAAAAAA);
+            return;
+        }
+
+        final int collected = record.getCollected().getOrDefault(material.materialKey, material.collected);
+        final int reserved = reservedAmount(material);
+        drawString(ctx, trim(material.displayName, 22), panelX + 10, panelY + 30, 0xFFFFFFFF);
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.missing") + ": "
+                + formatCount(Math.max(0, material.required - collected - reserved)), panelX + 10, panelY + 44, 0xFFFFD54F);
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.reserved") + ": "
+                + formatCount(reserved), panelX + 10, panelY + 58, 0xFFFFD54F);
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.claim_amount"), panelX + 10, panelY + 72, 0xFFC0C0C0);
+
+        drawClaimSlider(ctx, material, panelX + 10, panelY + 82, 146, 14);
+        drawString(ctx, formatCount(claimDraftAmount) + " / " + formatCount(maxClaimAmount(material)), panelX + 10, panelY + 102, 0xFF77DD77);
+
+        int y = panelY + 122;
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.claim_assignees"), panelX + 10, y, 0xFFC0C0C0);
+        y += 12;
+        final List<String> claimLines = WidgetListThirdPartyProject.claimLines(record, material.materialKey);
+        if (claimLines.isEmpty())
+        {
+            drawString(ctx, "-", panelX + 14, y, 0xFF909090);
+        }
+        else
+        {
+            for (int i = 0; i < Math.min(6, claimLines.size()); i++)
             {
-                drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.mine") + ": " + claim.targetAmount, x + listWidth - 48, rowY + 4, 0xFF77DD77);
+                drawString(ctx, trim(claimLines.get(i), 22), panelX + 14, y, 0xFFFFFFFF);
+                y += 12;
             }
         }
+    }
+
+    private void drawMaterialCounts(final GuiContext ctx, final ProjectMaterial material, final int collected, final int reserved, int x, final int y)
+    {
+        x = drawCountPart(ctx, formatCount(collected), x, y, collected >= material.required ? 0xFF55FF55 : (collected > 0 ? 0xFFFFD54F : 0xFFFF5555));
+        x = drawCountPart(ctx, "/", x, y, 0xFF777777);
+        x = drawCountPart(ctx, formatCount(reserved), x, y, reserved > 0 ? 0xFFFFD54F : 0xFF999999);
+        x = drawCountPart(ctx, "/", x, y, 0xFF777777);
+        drawCountPart(ctx, formatCount(material.required), x, y, 0xFF66CCFF);
+    }
+
+    private void drawClaimSlider(final GuiContext ctx, final ProjectMaterial material, final int x, final int y, final int sliderWidth, final int sliderHeight)
+    {
+        final int max = maxClaimAmount(material);
+        final double ratio = max <= 0 ? 0.0D : Math.min(1.0D, Math.max(0.0D, claimDraftAmount / (double) max));
+        final int fillWidth = (int) Math.round(sliderWidth * ratio);
+        RenderUtils.drawRect(ctx, x, y, sliderWidth, sliderHeight, 0xFF202020);
+        if (fillWidth > 0)
+        {
+            RenderUtils.drawRect(ctx, x, y, fillWidth, sliderHeight, 0xFF4B9F6A);
+        }
+        final int handleX = x + Math.max(0, fillWidth - 2);
+        RenderUtils.drawRect(ctx, handleX, y - 2, 4, sliderHeight + 4, 0xFFE0E0E0);
+    }
+
+    private void drawProgress(final GuiContext ctx, final int x, final int y, final int barWidth, final int barHeight, final int collected, final int required)
+    {
+        RenderUtils.drawRect(ctx, x, y, barWidth, barHeight, 0xFF202020);
+        final double ratio = required <= 0 ? 1.0D : Math.min(1.0D, Math.max(0.0D, collected / (double) required));
+        final int fillWidth = Math.max(0, (int) Math.round((barWidth - 2) * ratio));
+        final int color = ratio >= 1.0D ? 0xFF55AA55 : (ratio > 0.0D ? 0xFFD6A938 : 0xFF773333);
+        if (fillWidth > 0)
+        {
+            RenderUtils.drawRect(ctx, x + 1, y + 1, fillWidth, barHeight - 2, color);
+        }
+    }
+
+    private int drawCountPart(final GuiContext ctx, final String text, final int x, final int y, final int color)
+    {
+        drawString(ctx, text, x, y, color);
+        return x + getStringWidth(text);
+    }
+
+    private static String formatCount(final int count)
+    {
+        if (count >= 1728)
+        {
+            return String.format("%d(%.2f box)", count, count / 1728.0D);
+        }
+        if (count > 64)
+        {
+            final int stacks = count / 64;
+            final int remainder = count % 64;
+            return remainder > 0 ? count + "(" + stacks + "x64+" + remainder + ")" : count + "(" + stacks + "x64)";
+        }
+        return Integer.toString(count);
     }
 
     private void drawZones(final GuiContext ctx)
@@ -207,6 +346,146 @@ public class GuiThirdPartyProjectDetails extends GuiBase
                         Math.max(0, material.required - record.getCollected().getOrDefault(material.materialKey, material.collected))).reversed()
                         .thenComparing(material -> material.displayName, String.CASE_INSENSITIVE_ORDER))
                 .toList();
+    }
+
+    private ProjectMaterial selectedMaterial()
+    {
+        final List<ProjectMaterial> materials = sortedMaterials();
+        if (materials.isEmpty())
+        {
+            return null;
+        }
+        selectedMaterialIndex = clampSelectedMaterialIndex(selectedMaterialIndex);
+        return materials.get(selectedMaterialIndex);
+    }
+
+    private int clampSelectedMaterialIndex(final int index)
+    {
+        final int size = record.getMaterials().size();
+        if (size <= 0)
+        {
+            return 0;
+        }
+        return Math.max(0, Math.min(index, size - 1));
+    }
+
+    private int defaultClaimAmount(final ProjectMaterial material)
+    {
+        if (material == null)
+        {
+            return 1;
+        }
+        final int missing = Math.max(1, maxClaimAmount(material));
+        return Math.min(64, missing);
+    }
+
+    private int currentClaimAmount(final ProjectMaterial material)
+    {
+        final MaterialClaim claim = material == null ? null : myClaim(material.materialKey);
+        return claim == null ? 0 : claim.targetAmount;
+    }
+
+    private int maxClaimAmount(final ProjectMaterial material)
+    {
+        if (material == null)
+        {
+            return 0;
+        }
+        final int collected = record.getCollected().getOrDefault(material.materialKey, material.collected);
+        final int myClaim = currentClaimAmount(material);
+        return Math.max(0, material.required - collected - Math.max(0, reservedAmount(material) - myClaim));
+    }
+
+    private int reservedAmount(final ProjectMaterial material)
+    {
+        int reserved = 0;
+        for (final MaterialClaim claim : record.getClaims())
+        {
+            if (claim.materialKey.equals(material.materialKey))
+            {
+                reserved += claim.targetAmount;
+            }
+        }
+        return Math.max(material.reserved, reserved);
+    }
+
+    private boolean isOverClaimSlider(final int mouseX, final int mouseY)
+    {
+        final int x = operationPanelX() + 10;
+        final int y = materialListY() - 4 + 82;
+        return selectedMaterial() != null && mouseX >= x && mouseX <= x + 146 && mouseY >= y - 4 && mouseY <= y + 18;
+    }
+
+    private void updateClaimDraftFromMouse(final int mouseX)
+    {
+        final ProjectMaterial material = selectedMaterial();
+        final int max = maxClaimAmount(material);
+        final int x = operationPanelX() + 10;
+        final double ratio = Math.min(1.0D, Math.max(0.0D, (mouseX - x) / 146.0D));
+        claimDraftAmount = (int) Math.round(max * ratio);
+    }
+
+    private void applyClaimDraft()
+    {
+        final ProjectMaterial material = selectedMaterial();
+        if (material == null)
+        {
+            return;
+        }
+
+        final int current = currentClaimAmount(material);
+        if (claimDraftAmount == current)
+        {
+            return;
+        }
+        if (claimDraftAmount <= 0)
+        {
+            final MaterialClaim claim = myClaim(material.materialKey);
+            if (claim != null)
+            {
+                service().cancelClaim(claim.claimId);
+            }
+            return;
+        }
+        service().claimMaterial(record.getProjectId(), material.materialKey, claimDraftAmount);
+    }
+
+    private int materialRowAt(final int mouseX, final int mouseY)
+    {
+        final int x = 10;
+        final int y = materialListY() + 20;
+        final int listWidth = materialListWidth();
+        if (mouseX < x || mouseX > x + listWidth || mouseY < y)
+        {
+            return -1;
+        }
+        final int row = (mouseY - y) / 22;
+        return row >= 0 && row < visibleMaterialRows() && row < sortedMaterials().size() ? row : -1;
+    }
+
+    private int materialListY()
+    {
+        return 94;
+    }
+
+    private int materialListWidth()
+    {
+        return Math.max(220, width - 196);
+    }
+
+    private int materialListHeight()
+    {
+        return Math.max(176, height - 166);
+    }
+
+    private int visibleMaterialRows()
+    {
+        return Math.max(1, Math.min(12, (materialListHeight() - 28) / 22));
+    }
+
+    private int operationPanelX()
+    {
+        return width - 176;
     }
 
     private MaterialClaim myClaim(final String materialKey)

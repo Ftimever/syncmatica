@@ -3,6 +3,7 @@ package ch.endte.syncmatica.litematica_mixin;
 import ch.endte.syncmatica.Context;
 import ch.endte.syncmatica.litematica.LitematicManager;
 import ch.endte.syncmatica.litematica.gui.ButtonListenerShare;
+import ch.endte.syncmatica.service.ThirdPartySyncService;
 import fi.dy.masa.litematica.gui.widgets.WidgetListSchematicPlacements;
 import fi.dy.masa.litematica.gui.widgets.WidgetSchematicPlacement;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
@@ -55,12 +56,29 @@ public abstract class MixinWidgetSchematicPlacement extends WidgetListEntryBase<
             }
         }
 
-        final ButtonGeneric shareButton = new ButtonGeneric(buttonsStartX, y + 1, -1, true, "syncmatica.gui.button.share");
         final Context con = LitematicManager.getInstance().getActiveContext();
+        final ButtonGeneric shareButton = new ButtonGeneric(buttonsStartX, y + 1, -1, true, shareButtonLabel(con));
         final boolean buttonEnabled = con != null && con.isStarted() && !LitematicManager.getInstance().isSyncmatic(placement);
         shareButton.setEnabled(buttonEnabled);
         addButton(shareButton, new ButtonListenerShare(placement, parent.parent));
         buttonsStartX = shareButton.getX() - 1;
+    }
+
+    @Unique
+    private String shareButtonLabel(final Context context)
+    {
+        if (context == null || context.getThirdPartySyncService() == null)
+        {
+            return "syncmatica.gui.button.share";
+        }
+
+        final ThirdPartySyncService thirdParty = context.getThirdPartySyncService();
+        final String configured = thirdParty.getShareButtonLabel();
+        if (configured == null || configured.isBlank() || "share".equalsIgnoreCase(configured))
+        {
+            return "syncmatica.gui.button.share";
+        }
+        return configured;
     }
 
     @Unique

@@ -11,10 +11,12 @@ import ch.endte.syncmatica.communication.ExchangeTarget;
 import ch.endte.syncmatica.data.LocalLitematicState;
 import ch.endte.syncmatica.data.ServerPlacement;
 import ch.endte.syncmatica.litematica.LitematicManager;
+import ch.endte.syncmatica.litematica.ScreenHelper;
 import ch.endte.syncmatica.service.ThirdPartySyncService;
 import ch.endte.syncmatica.network.PacketType;
 import io.netty.buffer.Unpooled;
 import fi.dy.masa.malilib.gui.GuiBase;
+import fi.dy.masa.malilib.gui.Message;
 import fi.dy.masa.malilib.gui.button.ButtonBase;
 import fi.dy.masa.malilib.gui.button.ButtonGeneric;
 import fi.dy.masa.malilib.gui.button.IButtonActionListener;
@@ -55,7 +57,7 @@ public class WidgetSyncmaticaServerPlacementEntry extends WidgetListEntryBase<Se
         final ButtonGeneric matGathering = new ButtonGeneric(posX, y, len, 20, text);
         final Context context = LitematicManager.getInstance().getActiveContext();
         final ThirdPartySyncService thirdParty = context != null ? context.getThirdPartySyncService() : null;
-        matGathering.setEnabled(thirdParty != null && thirdParty.isThirdPartyMode());
+        matGathering.setEnabled(thirdParty != null && thirdParty.isThirdPartyMode() && thirdParty.isPlacementDownloaded(placement));
         addButton(matGathering, listener);
 
         final ArrayList<IButtonType> multi = new ArrayList<>();
@@ -156,7 +158,11 @@ public class WidgetSyncmaticaServerPlacementEntry extends WidgetListEntryBase<Se
                             final ThirdPartySyncService thirdParty = con.getThirdPartySyncService();
                             if (thirdParty != null && thirdParty.isThirdPartyMode())
                             {
-                                thirdParty.forgetProject(placement.placement);
+                                final var record = thirdParty.getProjectForPlacement(placement.placement);
+                                if (record != null)
+                                {
+                                    thirdParty.downloadProjectSchematic(record);
+                                }
                                 return;
                             }
                             final ExchangeTarget server = ((ClientCommunicationManager) con.getCommunicationManager()).getServer();
@@ -202,13 +208,15 @@ public class WidgetSyncmaticaServerPlacementEntry extends WidgetListEntryBase<Se
                             if (thirdParty != null && thirdParty.isThirdPartyMode())
                             {
                                 final var record = thirdParty.getProjectForPlacement(placement.placement);
-                                if (record != null)
+                                if (record != null && thirdParty.isProjectDownloaded(record))
                                 {
                                     final GuiThirdPartyProjectDetails gui = new GuiThirdPartyProjectDetails(record);
                                     gui.setParent(null);
                                     GuiBase.openGui(gui);
                                     return;
                                 }
+                                ScreenHelper.ifPresent(screen -> screen.addMessage(Message.MessageType.WARNING, "syncmatica.error.third_party_project_not_downloaded"));
+                                return;
                             }
                             Syncmatica.LOGGER.warn("Opened Material Gatherings GUI - currently unsupported operation");
                         }

@@ -2,9 +2,11 @@ package ch.endte.syncmatica.service;
 
 import ch.endte.syncmatica.Context;
 import ch.endte.syncmatica.Syncmatica;
+import ch.endte.syncmatica.data.RedirectFileStorage;
 import ch.endte.syncmatica.data.ServerPlacement;
 import ch.endte.syncmatica.litematica.LitematicManager;
 import ch.endte.syncmatica.litematica.ScreenHelper;
+import ch.endte.syncmatica.util.SyncmaticaUtil;
 import ch.endte.syncmatica.thirdparty.ThirdPartyApiClient;
 import ch.endte.syncmatica.thirdparty.ThirdPartyLocalStore;
 import ch.endte.syncmatica.thirdparty.ThirdPartyProjectRecord;
@@ -19,7 +21,9 @@ import com.google.gson.JsonObject;
 import fi.dy.masa.litematica.materials.MaterialListEntry;
 import fi.dy.masa.litematica.materials.MaterialListUtils;
 import fi.dy.masa.malilib.gui.Message;
+import fi.dy.masa.malilib.util.data.ItemType;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
+import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.core.BlockPos;
@@ -39,8 +43,13 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.io.InputStream;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Collections;
@@ -94,6 +103,7 @@ public class ThirdPartySyncService extends AbstractService
     private String materialKeyMode = "item_nbt";
     private boolean offlineQueueEnabled = true;
 
+    private String shareButtonLabel = "share";
     private boolean projectListEntry = true;
     private boolean statusInPlacementList = true;
     private boolean autoRefreshProjectOnOpen = true;
@@ -156,6 +166,7 @@ public class ThirdPartySyncService extends AbstractService
     private long lastStorageZoneScanMs = 0L;
     private long lastAdvancedScanMs = 0L;
     private long lastPendingFlushMs = 0L;
+    private String connectedNotificationBaseUrl = "";
 
     @Override
     public void getDefaultConfiguration(final IServiceConfiguration configuration)
@@ -237,6 +248,7 @@ public class ThirdPartySyncService extends AbstractService
         configuration.loadString("projectIdentityMode", value -> projectIdentityMode = value);
         configuration.loadString("materialKeyMode", value -> materialKeyMode = value);
         configuration.loadBoolean("offlineQueueEnabled", value -> offlineQueueEnabled = value);
+        configuration.loadString("shareButtonLabel", value -> shareButtonLabel = value);
         configuration.loadBoolean("showProjectListEntry", value -> projectListEntry = value);
         configuration.loadBoolean("showProjectStatusInPlacementList", value -> statusInPlacementList = value);
         configuration.loadBoolean("autoRefreshProjectOnOpen", value -> autoRefreshProjectOnOpen = value);
@@ -354,6 +366,11 @@ public class ThirdPartySyncService extends AbstractService
         return projectListEntry;
     }
 
+    public String getShareButtonLabel()
+    {
+        return shareButtonLabel;
+    }
+
     public boolean shouldShowProjectStatusInPlacementList()
     {
         return statusInPlacementList;
@@ -370,7 +387,144 @@ public class ThirdPartySyncService extends AbstractService
         {
             return null;
         }
-        return projects.get(getLocalRecordKey(placement));
+        final ThirdPartyProjectRecord local = projects.get(getLocalRecordKey(placement));
+        if (local != null)
+        {
+            return local;
+        }
+        for (final ThirdPartyProjectRecord record : projects.values())
+        {
+            if (placement.getId().toString().equals(record.getPlacementId())
+                    || placement.getHash().toString().equals(record.getSchematicHash()))
+            {
+                return record;
+            }
+        }
+        return null;
+    }
+
+    public boolean isProjectDownloaded(final ThirdPartyProjectRecord record)
+    {
+        if (record == null || record.getPlacement() == null)
+        {
+            return false;
+        }
+        return isPlacementDownloaded(record.getPlacement());
+    }
+
+    public boolean isPlacementDownloaded(final ServerPlacement placement)
+    {
+        if (placement == null)
+        {
+            return false;
+        }
+        if (isSyncCacheReady(placement))
+        {
+            return true;
+        }
+        if (context.getFileStorage().getLocalState(placement).isLocalFileReady())
+        {
+            return ensureSyncCache(placement);
+        }
+        return false;
+    }
+
+    private boolean isParticipating(final ThirdPartyProjectRecord record)
+    {
+        return isProjectDownloaded(record);
+    }
+
+    private Path syncCacheDirectory()
+    {
+        return context.getLitematicFolder().resolve("sync").normalize();
+    }
+
+    private Path syncCachePath(final ServerPlacement placement)
+    {
+        return syncCacheDirectory().resolve(placement.getHash().toString() + ".litematic").normalize();
+    }
+
+    private boolean isSyncCacheReady(final ServerPlacement placement)
+    {
+        if (placement == null)
+        {
+            return false;
+        }
+
+        final Path cached = syncCachePath(placement);
+        if (!Files.isRegularFile(cached))
+        {
+            return false;
+        }
+
+        try (InputStream input = Files.newInputStream(cached))
+        {
+            if (placement.getHash().equals(SyncmaticaUtil.createChecksum(input)))
+            {
+                addSyncCacheRedirect(cached);
+                return true;
+            }
+        }
+        catch (final Exception e)
+        {
+            Syncmatica.LOGGER.warn("Failed to validate third-party sync cache '{}': {}", cached, e.getLocalizedMessage());
+        }
+        return false;
+    }
+
+    private void addSyncCacheRedirect(final Path cached)
+    {
+        if (context.getFileStorage() instanceof RedirectFileStorage redirect)
+        {
+            redirect.addRedirect(cached);
+        }
+    }
+
+    private boolean ensureSyncCache(final ServerPlacement placement)
+    {
+        if (placement == null)
+        {
+            return false;
+        }
+        if (isSyncCacheReady(placement))
+        {
+            return true;
+        }
+
+        Path source = placement.getFile();
+        if (source == null || !Files.isRegularFile(source))
+        {
+            source = context.getFileStorage().getLocalLitematic(placement);
+        }
+        if (source == null || !Files.isRegularFile(source))
+        {
+            return false;
+        }
+
+        try
+        {
+            Files.createDirectories(syncCacheDirectory());
+            final Path target = syncCachePath(placement);
+            if (!source.toAbsolutePath().normalize().equals(target.toAbsolutePath().normalize()))
+            {
+                Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+            addSyncCacheRedirect(target);
+            return isSyncCacheReady(placement);
+        }
+        catch (final Exception e)
+        {
+            Syncmatica.LOGGER.warn("Failed to create third-party sync cache for '{}': {}", placement.getName(), e.getLocalizedMessage());
+            return false;
+        }
+    }
+
+    private void writeSyncCache(final ServerPlacement placement, final byte[] data) throws java.io.IOException
+    {
+        Files.createDirectories(syncCacheDirectory());
+        final Path target = syncCachePath(placement);
+        Files.write(target, data);
+        addSyncCacheRedirect(target);
     }
 
     public void sharePlacement(final SchematicPlacement schematicPlacement)
@@ -419,6 +573,7 @@ public class ThirdPartySyncService extends AbstractService
         record.setLastSyncMessage("");
 
         projects.put(recordKey, record);
+        ensureSyncCache(placement);
         context.getSyncmaticManager().addPlacement(placement);
         saveProjects();
 
@@ -450,6 +605,7 @@ public class ThirdPartySyncService extends AbstractService
                 try
                 {
                     mergeProjectList(apiClient.listProjects());
+                    notifyThirdPartyConnectionSucceeded();
                 }
                 catch (final Exception e)
                 {
@@ -457,7 +613,10 @@ public class ThirdPartySyncService extends AbstractService
                 }
                 for (final ThirdPartyProjectRecord record : projects.values())
                 {
-                    refreshProject(record);
+                    if (isParticipating(record))
+                    {
+                        refreshProject(record);
+                    }
                 }
                 saveProjects();
             }
@@ -474,10 +633,101 @@ public class ThirdPartySyncService extends AbstractService
         executor.submit(() -> {
             synchronized (this)
             {
+                if (!isParticipating(record))
+                {
+                    showMessage(Message.MessageType.WARNING, "syncmatica.error.third_party_project_not_downloaded");
+                    return;
+                }
                 refreshProject(record);
                 saveProjects();
             }
         });
+    }
+
+    public void downloadProjectSchematic(final ThirdPartyProjectRecord record)
+    {
+        if (!isThirdPartyMode() || record == null || record.getProjectId().isBlank()
+                || executor == null || apiClient == null || !apiClient.isConfigured())
+        {
+            return;
+        }
+
+        executor.submit(() -> {
+            synchronized (this)
+            {
+                try
+                {
+                    final ServerPlacement placement = record.getPlacement();
+                    if (placement != null && isSyncCacheReady(placement))
+                    {
+                        context.getSyncmaticManager().addPlacement(placement);
+                        saveProjects();
+                        showMessage(Message.MessageType.SUCCESS, "syncmatica.success.third_party_schematic_downloaded", placement.getName());
+                        LitematicManager.getInstance().renderSyncmatic(placement);
+                        return;
+                    }
+
+                    final JsonObject response = apiClient.downloadSchematic(record.getProjectId());
+                    notifyThirdPartyConnectionSucceeded();
+                    mergeServerPlacement(record, response);
+
+                    final ServerPlacement downloadedPlacement = record.getPlacement();
+                    if (downloadedPlacement == null)
+                    {
+                        showMessage(Message.MessageType.ERROR, "syncmatica.error.third_party_schematic_download_failed", "missing placement");
+                        return;
+                    }
+
+                    if (isSyncCacheReady(downloadedPlacement))
+                    {
+                        refreshProject(record);
+                        saveProjects();
+                        showMessage(Message.MessageType.SUCCESS, "syncmatica.success.third_party_schematic_downloaded", downloadedPlacement.getName());
+                        LitematicManager.getInstance().renderSyncmatic(downloadedPlacement);
+                        return;
+                    }
+
+                    final String encoded = readString(response, "data");
+                    if (encoded.isBlank())
+                    {
+                        showMessage(Message.MessageType.ERROR, "syncmatica.error.third_party_schematic_download_failed", "empty file");
+                        return;
+                    }
+
+                    writeSyncCache(downloadedPlacement, Base64.getDecoder().decode(encoded));
+
+                    if (!isSyncCacheReady(downloadedPlacement))
+                    {
+                        showMessage(Message.MessageType.ERROR, "syncmatica.error.third_party_schematic_download_failed", "hash mismatch");
+                        return;
+                    }
+
+                    context.getSyncmaticManager().addPlacement(downloadedPlacement);
+                    refreshProject(record);
+                    saveProjects();
+                    showMessage(Message.MessageType.SUCCESS, "syncmatica.success.third_party_schematic_downloaded", downloadedPlacement.getName());
+                    LitematicManager.getInstance().renderSyncmatic(downloadedPlacement);
+                }
+                catch (final Exception e)
+                {
+                    record.setLastSyncMessage(e.getMessage());
+                    showMessage(Message.MessageType.ERROR, "syncmatica.error.third_party_schematic_download_failed", e.getMessage());
+                    saveProjects();
+                }
+            }
+        });
+    }
+
+    public void recomputeLocalCollectedNow()
+    {
+        if (!isThirdPartyMode() || !inventoryAggregationEnabled)
+        {
+            return;
+        }
+
+        final long nowMs = System.currentTimeMillis();
+        recomputeLocalCollected(nowMs);
+        lastAggregateRecomputeMs = nowMs;
     }
 
     public void claimMaterial(final String projectId, final String materialKey, final int requestedAmount)
@@ -495,18 +745,43 @@ public class ThirdPartySyncService extends AbstractService
                 {
                     return;
                 }
-
-                final List<MaterialClaim> previousClaims = new ArrayList<>(record.getClaims());
-                final int amount = resolveClaimAmount(record, materialKey, requestedAmount);
-                if (amount <= 0 && !allowClaimOverRemaining)
+                if (!isParticipating(record))
                 {
-                    refreshProject(record);
-                    showMessage(Message.MessageType.WARNING, "syncmatica.error.third_party_claim_conflict", materialKey);
+                    showMessage(Message.MessageType.WARNING, "syncmatica.error.third_party_project_not_downloaded");
                     return;
                 }
 
+                final List<MaterialClaim> previousClaims = new ArrayList<>(record.getClaims());
+                final List<MaterialClaim> existingClaims = findClaims(record, materialKey, currentPlayerName());
+                final int existingAmount = existingClaims.stream().mapToInt(claim -> claim.targetAmount).sum();
+                final int amount = resolveClaimAmount(record, materialKey, requestedAmount, existingAmount);
+                if (amount <= 0 && !allowClaimOverRemaining)
+                {
+                    for (final MaterialClaim claim : existingClaims)
+                    {
+                        record.removeClaim(claim.claimId);
+                        try
+                        {
+                            apiClient.deleteClaim(claim.claimId);
+                            notifyThirdPartyConnectionSucceeded();
+                        }
+                        catch (final Exception e)
+                        {
+                            record.getClaims().clear();
+                            record.getClaims().addAll(previousClaims);
+                            record.setLastSyncMessage(e.getMessage());
+                            showMessage(Message.MessageType.WARNING, "syncmatica.error.third_party_claim_conflict", materialKey);
+                            saveProjects();
+                            return;
+                        }
+                    }
+                    saveProjects();
+                    return;
+                }
+
+                record.getClaims().removeIf(claim -> claim.materialKey.equals(materialKey) && claim.assignee.equalsIgnoreCase(currentPlayerName()));
                 final MaterialClaim optimistic = new MaterialClaim();
-                optimistic.claimId = "local-" + UUID.randomUUID();
+                optimistic.claimId = existingClaims.isEmpty() ? "local-" + UUID.randomUUID() : existingClaims.get(0).claimId;
                 optimistic.projectId = projectId;
                 optimistic.materialKey = materialKey;
                 optimistic.assignee = currentPlayerName();
@@ -519,12 +794,18 @@ public class ThirdPartySyncService extends AbstractService
                 final JsonObject body = new JsonObject();
                 body.addProperty("materialKey", materialKey);
                 body.addProperty("targetAmount", amount);
+                body.addProperty("assignee", currentPlayerName());
                 body.addProperty("claimAmountMode", defaultClaimAmountMode);
                 body.addProperty("colorMode", claimColorMode);
+                if (!existingClaims.isEmpty())
+                {
+                    body.addProperty("claimId", existingClaims.get(0).claimId);
+                }
 
                 try
                 {
                     final JsonObject response = apiClient.upsertClaim(projectId, body);
+                    notifyThirdPartyConnectionSucceeded();
                     record.mergeProjectDetails(response);
                 }
                 catch (final Exception e)
@@ -561,6 +842,7 @@ public class ThirdPartySyncService extends AbstractService
                 try
                 {
                     apiClient.deleteClaim(claimId);
+                    notifyThirdPartyConnectionSucceeded();
                     for (final ThirdPartyProjectRecord record : projects.values())
                     {
                         record.removeClaim(claimId);
@@ -586,8 +868,12 @@ public class ThirdPartySyncService extends AbstractService
             synchronized (this)
             {
                 final ThirdPartyProjectRecord record = getProjectByProjectId(projectId);
-                if (record == null || record.getZones().size() >= maxZonesPerProject)
+                if (record == null || !isParticipating(record) || record.getZones().size() >= maxZonesPerProject)
                 {
+                    if (record != null && !isParticipating(record))
+                    {
+                        showMessage(Message.MessageType.WARNING, "syncmatica.error.third_party_project_not_downloaded");
+                    }
                     return;
                 }
 
@@ -609,6 +895,7 @@ public class ThirdPartySyncService extends AbstractService
                     if (apiClient != null && apiClient.isConfigured())
                     {
                         record.mergeProjectDetails(apiClient.upsertZone(projectId, zone.toJson()));
+                        notifyThirdPartyConnectionSucceeded();
                     }
                 }
                 catch (final Exception e)
@@ -632,7 +919,7 @@ public class ThirdPartySyncService extends AbstractService
         {
             for (final ThirdPartyProjectRecord record : projects.values())
             {
-                if (record.getPlacement() == null)
+                if (!isParticipating(record))
                 {
                     continue;
                 }
@@ -661,9 +948,10 @@ public class ThirdPartySyncService extends AbstractService
                         return created;
                     });
                     final int collectedAmount = record.getCollected().getOrDefault(material.materialKey, material.collected);
+                    final int reservedAmount = reservedAmount(record, material);
                     entry.required += material.required;
                     entry.collected += collectedAmount;
-                    entry.reserved += material.reserved;
+                    entry.reserved += reservedAmount;
                     entry.missing = Math.max(0, entry.required - entry.collected);
                     entry.claimedByMe |= claimedByMe;
                     entry.projectNames.add(record.getPlacement().getName());
@@ -688,6 +976,10 @@ public class ThirdPartySyncService extends AbstractService
         {
             if (record.getProjectId().equals(projectId))
             {
+                if (!isParticipating(record))
+                {
+                    return;
+                }
                 if (record.getCollected().equals(collected))
                 {
                     return;
@@ -879,13 +1171,30 @@ public class ThirdPartySyncService extends AbstractService
         }
 
         final String key = materialKey(stack);
+        final String stackItemId = itemId(stack);
         synchronized (this)
         {
             for (final ThirdPartyProjectRecord record : projects.values())
             {
+                if (!isParticipating(record))
+                {
+                    continue;
+                }
+                String materialKey = key;
+                String itemId = stackItemId;
+                for (final ProjectMaterial material : record.getMaterials())
+                {
+                    if (material.materialKey.equals(key) || material.itemId.equals(stackItemId))
+                    {
+                        materialKey = material.materialKey;
+                        itemId = material.itemId;
+                        break;
+                    }
+                }
                 for (final MaterialClaim claim : record.getClaims())
                 {
-                    if (claim.materialKey.equals(key) && (playerName == null || playerName.isBlank() || claim.assignee.equalsIgnoreCase(playerName)))
+                    if ((claim.materialKey.equals(materialKey) || claim.materialKey.equals(itemId))
+                            && (playerName == null || playerName.isBlank() || claim.assignee.equalsIgnoreCase(playerName)))
                     {
                         return useClaimColors ? colorForClaim(claim) : 0xFFFFD54F;
                     }
@@ -983,7 +1292,7 @@ public class ThirdPartySyncService extends AbstractService
             return;
         }
 
-        final Map<String, Integer> playerCounts = includePlayerInventory ? countInventory(mc.player.getInventory()) : Collections.emptyMap();
+        final Object2IntOpenHashMap<ItemType> playerCounts = includePlayerInventory ? countPlayerInventory(mc.player) : new Object2IntOpenHashMap<>();
         final List<ThirdPartyProjectRecord> snapshot;
         synchronized (this)
         {
@@ -992,7 +1301,7 @@ public class ThirdPartySyncService extends AbstractService
 
         for (final ThirdPartyProjectRecord record : snapshot)
         {
-            if (record.getMaterials().isEmpty())
+            if (!isParticipating(record) || record.getMaterials().isEmpty())
             {
                 continue;
             }
@@ -1003,15 +1312,15 @@ public class ThirdPartySyncService extends AbstractService
                 int amount = 0;
                 if (includePlayerInventory)
                 {
-                    amount += playerCounts.getOrDefault(material.materialKey, 0);
+                    amount += countMaterialAmount(playerCounts, material);
                 }
                 if (includeStorageZones && countZoneContentsForProject)
                 {
-                    amount += countStorageZoneMaterial(record, material.materialKey);
+                    amount += countStorageZoneMaterial(record, material);
                 }
                 if (includeNonZoneContainers && nonZoneScansAffectProjectCollected)
                 {
-                    amount += countAdvancedMaterial(material.materialKey);
+                    amount += countAdvancedMaterial(material);
                 }
                 collected.put(material.materialKey, Math.min(material.required, amount));
             }
@@ -1024,7 +1333,7 @@ public class ThirdPartySyncService extends AbstractService
         }
     }
 
-    private int countStorageZoneMaterial(final ThirdPartyProjectRecord record, final String materialKey)
+    private int countStorageZoneMaterial(final ThirdPartyProjectRecord record, final ProjectMaterial material)
     {
         if (record.getZones().isEmpty())
         {
@@ -1039,17 +1348,17 @@ public class ThirdPartySyncService extends AbstractService
             {
                 continue;
             }
-            amount += entry.getValue().getOrDefault(materialKey, 0);
+            amount += countMaterialAmount(entry.getValue(), material);
         }
         return amount;
     }
 
-    private int countAdvancedMaterial(final String materialKey)
+    private int countAdvancedMaterial(final ProjectMaterial material)
     {
         int amount = 0;
         for (final AdvancedContainerHit hit : advancedHits.values())
         {
-            amount += hit.matchingMaterials.getOrDefault(materialKey, 0);
+            amount += countMaterialAmount(hit.matchingMaterials, material);
         }
         return amount;
     }
@@ -1061,13 +1370,17 @@ public class ThirdPartySyncService extends AbstractService
         {
             for (final ThirdPartyProjectRecord record : projects.values())
             {
+                if (!isParticipating(record))
+                {
+                    continue;
+                }
                 for (final ProjectMaterial material : record.getMaterials())
                 {
                     if (!isClaimedBy(record, material.materialKey, playerName))
                     {
                         continue;
                     }
-                    final int amount = contents.getOrDefault(material.materialKey, 0);
+                    final int amount = countMaterialAmount(contents, material);
                     if (amount > 0)
                     {
                         matches.merge(material.materialKey, amount, Integer::sum);
@@ -1076,6 +1389,39 @@ public class ThirdPartySyncService extends AbstractService
             }
         }
         return matches;
+    }
+
+    private Object2IntOpenHashMap<ItemType> countPlayerInventory(final Player player)
+    {
+        final Object2IntOpenHashMap<ItemType> counts = new Object2IntOpenHashMap<>();
+        if (player == null)
+        {
+            return counts;
+        }
+
+        final Inventory inventory = player.getInventory();
+        if (inventory == null)
+        {
+            return counts;
+        }
+
+        if (includeShulkerContents)
+        {
+            counts.putAll(MaterialListUtils.getInventoryItemCounts(inventory));
+        }
+        else
+        {
+            for (int i = 0; i < inventory.getContainerSize(); i++)
+            {
+                final ItemStack stack = inventory.getItem(i);
+                if (!stack.isEmpty())
+                {
+                    counts.addTo(new ItemType(stack, true, false), stack.getCount());
+                }
+            }
+        }
+
+        return counts;
     }
 
     private Map<String, Integer> countInventory(final Inventory inventory)
@@ -1110,7 +1456,13 @@ public class ThirdPartySyncService extends AbstractService
             return;
         }
 
-        counts.merge(materialKey(stack), stack.getCount(), Integer::sum);
+        final String key = materialKey(stack);
+        final String itemId = itemId(stack);
+        counts.merge(key, stack.getCount(), Integer::sum);
+        if (!key.equals(itemId))
+        {
+            counts.merge(itemId, stack.getCount(), Integer::sum);
+        }
         if (!includeShulkerContents || depth > 3)
         {
             return;
@@ -1122,6 +1474,66 @@ public class ThirdPartySyncService extends AbstractService
             return;
         }
         contents.nonEmptyItemCopyStream().forEach(nested -> addStackCounts(counts, nested, depth + 1));
+    }
+
+    private int countMaterialAmount(final Map<String, Integer> counts, final ProjectMaterial material)
+    {
+        if (counts == null || material == null)
+        {
+            return 0;
+        }
+        if ("item_id".equals(materialKeyMode))
+        {
+            return counts.getOrDefault(material.itemId, 0);
+        }
+
+        final int exact = counts.getOrDefault(material.materialKey, 0);
+        if (exact > 0)
+        {
+            return exact;
+        }
+        return counts.getOrDefault(material.itemId, 0);
+    }
+
+    private int countMaterialAmount(final Object2IntOpenHashMap<ItemType> counts, final ProjectMaterial material)
+    {
+        if (counts == null || material == null || material.itemId == null || material.itemId.isBlank())
+        {
+            return 0;
+        }
+
+        final ItemStack materialStack = stackForItemId(material.itemId);
+        if (materialStack.isEmpty())
+        {
+            return 0;
+        }
+
+        final int exact = counts.getInt(new ItemType(materialStack, true, false));
+        if (exact > 0)
+        {
+            return exact;
+        }
+
+        int amount = 0;
+        for (final ItemType type : counts.keySet())
+        {
+            final ItemStack stack = type.getStack();
+            if (!stack.isEmpty() && material.itemId.equals(itemId(stack)))
+            {
+                amount += counts.getInt(type);
+            }
+        }
+        return amount;
+    }
+
+    private boolean isDefaultComponentMaterial(final ProjectMaterial material)
+    {
+        if (material == null || material.itemId == null || material.itemId.isBlank())
+        {
+            return false;
+        }
+        final ItemStack stack = stackForItemId(material.itemId);
+        return !stack.isEmpty() && nbtHash(stack).equals(material.nbtHash);
     }
 
     private boolean isReachableContainer(final Player player, final BlockPos pos)
@@ -1266,7 +1678,7 @@ public class ThirdPartySyncService extends AbstractService
 
     private void renderAdvancedHud(final GuiGraphicsExtractor gui, final Minecraft mc)
     {
-        if (!advancedStockingEnabled || !showContainerPreview || advancedHits.isEmpty())
+        if (!advancedStockingEnabled || advancedHits.isEmpty())
         {
             return;
         }
@@ -1287,9 +1699,12 @@ public class ThirdPartySyncService extends AbstractService
             {
                 drawLine(gui, centerX, centerY, labelX - 4, labelY + 4, 0xAA66CCFF);
             }
-            final String line = "@" + hit.position.getX() + " " + hit.position.getY() + " " + hit.position.getZ() + " " + trimHudLine(hit.preview(), 26);
-            gui.fill(labelX - 3, labelY - 3, labelX + Math.min(170, mc.font.width(line) + 6), labelY + 10, 0x77000000);
-            gui.text(mc.font, line, labelX, labelY, 0xFF66CCFF);
+            if (showContainerPreview)
+            {
+                final String line = "@" + hit.position.getX() + " " + hit.position.getY() + " " + hit.position.getZ() + " " + trimHudLine(hit.preview(), 26);
+                gui.fill(labelX - 3, labelY - 3, labelX + Math.min(170, mc.font.width(line) + 6), labelY + 10, 0x77000000);
+                gui.text(mc.font, line, labelX, labelY, 0xFF66CCFF);
+            }
             index++;
         }
     }
@@ -1372,13 +1787,16 @@ public class ThirdPartySyncService extends AbstractService
 
     private void refreshProject(final ThirdPartyProjectRecord record)
     {
-        if (record.getProjectId().isBlank())
+        if (record.getProjectId().isBlank() || !isParticipating(record))
         {
             return;
         }
         try
         {
-            record.mergeProjectDetails(apiClient.getProject(record.getProjectId()));
+            final JsonObject response = apiClient.getProject(record.getProjectId());
+            record.mergeProjectDetails(response);
+            mergeServerPlacement(record, response);
+            notifyThirdPartyConnectionSucceeded();
         }
         catch (final Exception e)
         {
@@ -1393,7 +1811,9 @@ public class ThirdPartySyncService extends AbstractService
             if (record.isPendingImport())
             {
                 final JsonObject response = apiClient.importProject(createImportBody(record));
+                notifyThirdPartyConnectionSucceeded();
                 record.mergeProjectDetails(response);
+                mergeServerPlacement(record, response);
                 if (response.has("projectId"))
                 {
                     record.setProjectId(response.get("projectId").getAsString());
@@ -1408,9 +1828,10 @@ public class ThirdPartySyncService extends AbstractService
                 }
             }
 
-            if (record.isPendingCollected() && !record.getProjectId().isBlank())
+            if (record.isPendingCollected() && !record.getProjectId().isBlank() && isParticipating(record))
             {
                 apiClient.uploadCollected(record.getProjectId(), createCollectedBody(record));
+                notifyThirdPartyConnectionSucceeded();
                 record.setPendingCollected(false);
                 record.setStatus(ThirdPartyProjectRecord.STATUS_SYNCED);
                 record.setLastSyncMessage("");
@@ -1450,8 +1871,42 @@ public class ThirdPartySyncService extends AbstractService
         body.addProperty("materialKeyMode", materialKeyMode);
         body.addProperty("uploadSchematicFile", uploadSchematicFile);
         body.add("placement", placementJson);
+        body.add("serverPlacement", placement.toJson());
+        addSchematicFile(body, placement);
         body.add("materials", serializeMaterials(record.getMaterials()));
         return body;
+    }
+
+    private void addSchematicFile(final JsonObject body, final ServerPlacement placement)
+    {
+        if (!uploadSchematicFile)
+        {
+            return;
+        }
+
+        try
+        {
+            Path file = placement.getFile();
+            if (file == null || !Files.isRegularFile(file))
+            {
+                file = context.getFileStorage().getLocalLitematic(placement);
+            }
+            if (file == null || !Files.isRegularFile(file))
+            {
+                return;
+            }
+
+            final JsonObject schematicFile = new JsonObject();
+            schematicFile.addProperty("fileName", placement.getNormalFileName());
+            schematicFile.addProperty("hash", placement.getHash().toString());
+            schematicFile.addProperty("encoding", "base64");
+            schematicFile.addProperty("data", Base64.getEncoder().encodeToString(Files.readAllBytes(file)));
+            body.add("schematicFile", schematicFile);
+        }
+        catch (final Exception e)
+        {
+            Syncmatica.LOGGER.warn("Failed to attach third-party schematic file '{}': {}", placement.getName(), e.getLocalizedMessage());
+        }
     }
 
     private JsonObject createCollectedBody(final ThirdPartyProjectRecord record)
@@ -1518,17 +1973,65 @@ public class ThirdPartySyncService extends AbstractService
             final String key = remoteRecordKey(project.projectId);
             final ThirdPartyProjectRecord record = projects.computeIfAbsent(key, ignored -> new ThirdPartyProjectRecord(project.projectId, null));
             record.setProjectKey(key);
-            record.mergeProjectDetails(obj);
-            if (record.getProject().projectId.isBlank())
-            {
-                record.setProject(project);
-            }
+            record.setProject(project);
             record.setProjectId(project.projectId);
             record.setUpdatedAt(project.updatedAt);
             if (!project.status.isBlank())
             {
                 record.setStatus(project.status);
             }
+            mergeServerPlacement(record, obj);
+            if (isParticipating(record))
+            {
+                record.mergeProjectDetails(obj);
+            }
+        }
+    }
+
+    private void mergeServerPlacement(final ThirdPartyProjectRecord record, final JsonObject response)
+    {
+        if (record == null || response == null)
+        {
+            return;
+        }
+
+        JsonObject placementJson = null;
+        if (response.has("serverPlacement") && response.get("serverPlacement").isJsonObject())
+        {
+            placementJson = response.getAsJsonObject("serverPlacement");
+        }
+        else if (response.has("placementData") && response.get("placementData").isJsonObject())
+        {
+            placementJson = response.getAsJsonObject("placementData");
+        }
+        else if (response.has("placement") && response.get("placement").isJsonObject()
+                && response.getAsJsonObject("placement").has("id"))
+        {
+            placementJson = response.getAsJsonObject("placement");
+        }
+        else if (response.has("id") && response.has("file_name") && response.has("hash"))
+        {
+            placementJson = response;
+        }
+
+        if (placementJson == null)
+        {
+            return;
+        }
+
+        try
+        {
+            final ServerPlacement placement = ServerPlacement.fromJson(placementJson, context);
+            if (placement != null)
+            {
+                record.setPlacement(placement);
+                isSyncCacheReady(placement);
+                context.getSyncmaticManager().addPlacement(placement);
+            }
+        }
+        catch (final Exception e)
+        {
+            Syncmatica.LOGGER.warn("Failed to merge third-party placement for project '{}': {}", record.getProjectId(), e.getLocalizedMessage());
         }
     }
 
@@ -1552,14 +2055,17 @@ public class ThirdPartySyncService extends AbstractService
             final JsonObject body = queued.has("body") && queued.get("body").isJsonObject()
                     ? queued.getAsJsonObject("body")
                     : new JsonObject();
+            final ThirdPartyProjectRecord record = getProjectByProjectId(projectId);
+            if (record == null || !isParticipating(record))
+            {
+                remaining.add(queued);
+                continue;
+            }
             try
             {
                 final JsonObject response = apiClient.upsertClaim(projectId, body);
-                final ThirdPartyProjectRecord record = getProjectByProjectId(projectId);
-                if (record != null)
-                {
-                    record.mergeProjectDetails(response);
-                }
+                notifyThirdPartyConnectionSucceeded();
+                record.mergeProjectDetails(response);
             }
             catch (final Exception e)
             {
@@ -1567,14 +2073,10 @@ public class ThirdPartySyncService extends AbstractService
                 {
                     remaining.add(queued);
                 }
-                final ThirdPartyProjectRecord record = getProjectByProjectId(projectId);
-                if (record != null)
+                record.setLastSyncMessage(e.getMessage());
+                if (isConflict(e))
                 {
-                    record.setLastSyncMessage(e.getMessage());
-                    if (isConflict(e))
-                    {
-                        refreshProject(record);
-                    }
+                    refreshProject(record);
                 }
             }
         }
@@ -1609,14 +2111,15 @@ public class ThirdPartySyncService extends AbstractService
         }
     }
 
-    private int resolveClaimAmount(final ThirdPartyProjectRecord record, final String materialKey, final int requestedAmount)
+    private int resolveClaimAmount(final ThirdPartyProjectRecord record, final String materialKey, final int requestedAmount, final int existingAmount)
     {
         if (requestedAmount > 0)
         {
-            return allowClaimOverRemaining ? requestedAmount : Math.min(requestedAmount, getRemainingClaimable(record, materialKey));
+            final int editableMaximum = getRemainingClaimable(record, materialKey) + Math.max(0, existingAmount);
+            return allowClaimOverRemaining ? requestedAmount : Math.min(requestedAmount, editableMaximum);
         }
 
-        final int remaining = getRemainingClaimable(record, materialKey);
+        final int remaining = getRemainingClaimable(record, materialKey) + Math.max(0, existingAmount);
         if ("smart_stack".equals(defaultClaimAmountMode) && remaining > 64)
         {
             return 64;
@@ -1680,10 +2183,40 @@ public class ThirdPartySyncService extends AbstractService
         {
             if (material.materialKey.equals(materialKey))
             {
-                return Math.max(0, material.required - material.collected - material.reserved);
+                return Math.max(0, material.required - material.collected - reservedAmount(record, material));
             }
         }
         return 0;
+    }
+
+    private int reservedAmount(final ThirdPartyProjectRecord record, final ProjectMaterial material)
+    {
+        int amount = 0;
+        for (final MaterialClaim claim : record.getClaims())
+        {
+            if (claim.materialKey.equals(material.materialKey))
+            {
+                amount += claim.targetAmount;
+            }
+        }
+        return Math.max(material.reserved, amount);
+    }
+
+    private List<MaterialClaim> findClaims(final ThirdPartyProjectRecord record, final String materialKey, final String playerName)
+    {
+        final List<MaterialClaim> claims = new ArrayList<>();
+        if (record == null || playerName == null)
+        {
+            return claims;
+        }
+        for (final MaterialClaim claim : record.getClaims())
+        {
+            if (claim.materialKey.equals(materialKey) && claim.assignee.equalsIgnoreCase(playerName))
+            {
+                claims.add(claim);
+            }
+        }
+        return claims;
     }
 
     private boolean isClaimedBy(final ThirdPartyProjectRecord record, final String materialKey, final String playerName)
@@ -1705,6 +2238,17 @@ public class ThirdPartySyncService extends AbstractService
 
     private Comparator<MergedHudEntry> hudComparator()
     {
+        if ("name".equals(sortMode))
+        {
+            return Comparator.comparing(entry -> entry.displayName, String.CASE_INSENSITIVE_ORDER);
+        }
+        if ("claimed_first".equals(sortMode))
+        {
+            return Comparator
+                    .comparing((MergedHudEntry entry) -> !entry.claimedByMe)
+                    .thenComparing(Comparator.comparingInt((MergedHudEntry entry) -> entry.missing).reversed())
+                    .thenComparing(entry -> entry.displayName, String.CASE_INSENSITIVE_ORDER);
+        }
         return Comparator
                 .comparingInt((MergedHudEntry entry) -> entry.missing).reversed()
                 .thenComparing(entry -> !entry.claimedByMe)
@@ -1892,5 +2436,15 @@ public class ThirdPartySyncService extends AbstractService
     private void showMessage(final Message.MessageType type, final String key, final Object... args)
     {
         ScreenHelper.ifPresent(helper -> helper.addMessage(type, key, args));
+    }
+
+    private void notifyThirdPartyConnectionSucceeded()
+    {
+        if (baseUrl == null || baseUrl.isBlank() || baseUrl.equals(connectedNotificationBaseUrl))
+        {
+            return;
+        }
+        connectedNotificationBaseUrl = baseUrl;
+        showMessage(Message.MessageType.SUCCESS, "syncmatica.success.third_party_connected", baseUrl);
     }
 }
