@@ -14,6 +14,7 @@ import ch.endte.syncmatica.litematica.LitematicManager;
 import ch.endte.syncmatica.service.ThirdPartySyncService;
 import ch.endte.syncmatica.network.PacketType;
 import io.netty.buffer.Unpooled;
+import fi.dy.masa.malilib.gui.GuiBase;
 import fi.dy.masa.malilib.gui.button.ButtonBase;
 import fi.dy.masa.malilib.gui.button.ButtonGeneric;
 import fi.dy.masa.malilib.gui.button.IButtonActionListener;
@@ -52,7 +53,9 @@ public class WidgetSyncmaticaServerPlacementEntry extends WidgetListEntryBase<Se
         posX -= (len + 2);
         listener = new ButtonListener(ButtonListener.Type.MATERIAL_GATHERING, this);
         final ButtonGeneric matGathering = new ButtonGeneric(posX, y, len, 20, text);
-        matGathering.setEnabled(false);
+        final Context context = LitematicManager.getInstance().getActiveContext();
+        final ThirdPartySyncService thirdParty = context != null ? context.getThirdPartySyncService() : null;
+        matGathering.setEnabled(thirdParty != null && thirdParty.isThirdPartyMode());
         addButton(matGathering, listener);
 
         final ArrayList<IButtonType> multi = new ArrayList<>();
@@ -194,6 +197,19 @@ public class WidgetSyncmaticaServerPlacementEntry extends WidgetListEntryBase<Se
                         @Override
                         void onAction(final WidgetSyncmaticaServerPlacementEntry placement)
                         {
+                            final Context con = LitematicManager.getInstance().getActiveContext();
+                            final ThirdPartySyncService thirdParty = con.getThirdPartySyncService();
+                            if (thirdParty != null && thirdParty.isThirdPartyMode())
+                            {
+                                final var record = thirdParty.getProjectForPlacement(placement.placement);
+                                if (record != null)
+                                {
+                                    final GuiThirdPartyProjectDetails gui = new GuiThirdPartyProjectDetails(record);
+                                    gui.setParent(null);
+                                    GuiBase.openGui(gui);
+                                    return;
+                                }
+                            }
                             Syncmatica.LOGGER.warn("Opened Material Gatherings GUI - currently unsupported operation");
                         }
                     };

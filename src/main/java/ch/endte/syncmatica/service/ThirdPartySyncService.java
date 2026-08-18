@@ -10,6 +10,7 @@ import ch.endte.syncmatica.thirdparty.ThirdPartyLocalStore;
 import ch.endte.syncmatica.thirdparty.ThirdPartyProjectRecord;
 import ch.endte.syncmatica.thirdparty.MaterialClaim;
 import ch.endte.syncmatica.thirdparty.MergedHudEntry;
+import ch.endte.syncmatica.thirdparty.Project;
 import ch.endte.syncmatica.thirdparty.ProjectMaterial;
 import ch.endte.syncmatica.thirdparty.StorageZone;
 import com.google.gson.JsonArray;
@@ -28,6 +29,7 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.world.Container;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.ItemContainerContents;
 import net.minecraft.world.level.ClipContext;
@@ -149,6 +151,7 @@ public class ThirdPartySyncService extends AbstractService
     private final Map<String, Map<String, Integer>> scannedZoneContents = new LinkedHashMap<>();
     private final Map<String, AdvancedContainerHit> advancedHits = new LinkedHashMap<>();
     private JsonObject scanCache = new JsonObject();
+    private JsonObject claimsCache = new JsonObject();
     private long lastAggregateRecomputeMs = 0L;
     private long lastStorageZoneScanMs = 0L;
     private long lastAdvancedScanMs = 0L;
@@ -290,22 +293,22 @@ public class ThirdPartySyncService extends AbstractService
         store = new ThirdPartyLocalStore(context);
         store.ensureCacheFiles();
         scanCache = store.loadScanCache();
+        claimsCache = store.loadClaims();
         projects.clear();
         for (final ThirdPartyProjectRecord record : store.loadProjects().values())
         {
-            if (record.getPlacement() == null)
-            {
-                continue;
-            }
             if (record.getProjectKey().isBlank())
             {
-                record.setProjectKey(getLocalRecordKey(record.getPlacement()));
+                record.setProjectKey(getRecordKey(record));
             }
             projects.put(record.getProjectKey(), record);
         }
         for (final ThirdPartyProjectRecord record : projects.values())
         {
-            context.getSyncmaticManager().addPlacement(record.getPlacement());
+            if (record.getPlacement() != null)
+            {
+                context.getSyncmaticManager().addPlacement(record.getPlacement());
+            }
         }
         apiClient = new ThirdPartyApiClient(baseUrl, apiToken, requestTimeoutMs);
         executor = Executors.newSingleThreadExecutor(r -> {
@@ -444,6 +447,14 @@ public class ThirdPartySyncService extends AbstractService
         executor.submit(() -> {
             synchronized (this)
             {
+                try
+                {
+                    mergeProjectList(apiClient.listProjects());
+                }
+                catch (final Exception e)
+                {
+                    Syncmatica.LOGGER.warn("Third-party project list refresh failed: {}", e.getLocalizedMessage());
+                }
                 for (final ThirdPartyProjectRecord record : projects.values())
                 {
                     refreshProject(record);
@@ -453,9 +464,25 @@ public class ThirdPartySyncService extends AbstractService
         });
     }
 
+    public void refreshProjectDetails(final ThirdPartyProjectRecord record)
+    {
+        if (!isThirdPartyMode() || record == null || executor == null || apiClient == null || !apiClient.isConfigured())
+        {
+            return;
+        }
+
+        executor.submit(() -> {
+            synchronized (this)
+            {
+                refreshProject(record);
+                saveProjects();
+            }
+        });
+    }
+
     public void claimMaterial(final String projectId, final String materialKey, final int requestedAmount)
     {
-        if (!claimsEnabled || projectId == null || materialKey == null || requestedAmount <= 0)
+        if (!claimsEnabled || projectId == null || materialKey == null)
         {
             return;
         }
@@ -469,13 +496,25 @@ public class ThirdPartySyncService extends AbstractService
                     return;
                 }
 
-                final int amount = Math.min(requestedAmount, getRemainingClaimable(record, materialKey));
+                final List<MaterialClaim> previousClaims = new ArrayList<>(record.getClaims());
+                final int amount = resolveClaimAmount(record, materialKey, requestedAmount);
                 if (amount <= 0 && !allowClaimOverRemaining)
                 {
                     refreshProject(record);
                     showMessage(Message.MessageType.WARNING, "syncmatica.error.third_party_claim_conflict", materialKey);
                     return;
                 }
+
+                final MaterialClaim optimistic = new MaterialClaim();
+                optimistic.claimId = "local-" + UUID.randomUUID();
+                optimistic.projectId = projectId;
+                optimistic.materialKey = materialKey;
+                optimistic.assignee = currentPlayerName();
+                optimistic.targetAmount = amount;
+                optimistic.fulfilledAmount = 0;
+                optimistic.colorTag = materialKey;
+                optimistic.updatedAt = now();
+                record.getClaims().add(optimistic);
 
                 final JsonObject body = new JsonObject();
                 body.addProperty("materialKey", materialKey);
@@ -490,8 +529,18 @@ public class ThirdPartySyncService extends AbstractService
                 }
                 catch (final Exception e)
                 {
+                    record.getClaims().clear();
+                    record.getClaims().addAll(previousClaims);
                     record.setLastSyncMessage(e.getMessage());
-                    refreshProject(record);
+                    if (offlineQueueEnabled && !isConflict(e))
+                    {
+                        queueClaim(projectId, body);
+                        record.getClaims().add(optimistic);
+                    }
+                    else
+                    {
+                        refreshProject(record);
+                    }
                     showMessage(Message.MessageType.WARNING, "syncmatica.error.third_party_claim_conflict", materialKey);
                 }
                 saveProjects();
@@ -520,6 +569,51 @@ public class ThirdPartySyncService extends AbstractService
                 catch (final Exception e)
                 {
                     Syncmatica.LOGGER.warn("Third-party claim cancel failed: {}", e.getLocalizedMessage());
+                }
+                saveProjects();
+            }
+        });
+    }
+
+    public void upsertStorageZone(final String projectId, final String dimension, final BlockPos first, final BlockPos second)
+    {
+        if (!storageZonesEnabled || projectId == null || projectId.isBlank() || first == null || second == null)
+        {
+            return;
+        }
+
+        executor.submit(() -> {
+            synchronized (this)
+            {
+                final ThirdPartyProjectRecord record = getProjectByProjectId(projectId);
+                if (record == null || record.getZones().size() >= maxZonesPerProject)
+                {
+                    return;
+                }
+
+                final StorageZone zone = new StorageZone();
+                zone.zoneId = "local-zone-" + UUID.randomUUID();
+                zone.projectId = projectId;
+                zone.dimension = dimension == null || dimension.isBlank() ? currentDimension() : dimension;
+                zone.minX = Math.min(first.getX(), second.getX());
+                zone.minY = Math.min(first.getY(), second.getY());
+                zone.minZ = Math.min(first.getZ(), second.getZ());
+                zone.maxX = Math.max(first.getX(), second.getX());
+                zone.maxY = Math.max(first.getY(), second.getY());
+                zone.maxZ = Math.max(first.getZ(), second.getZ());
+                zone.enabled = true;
+                record.getZones().add(zone);
+
+                try
+                {
+                    if (apiClient != null && apiClient.isConfigured())
+                    {
+                        record.mergeProjectDetails(apiClient.upsertZone(projectId, zone.toJson()));
+                    }
+                }
+                catch (final Exception e)
+                {
+                    record.setLastSyncMessage(e.getMessage());
                 }
                 saveProjects();
             }
@@ -667,23 +761,114 @@ public class ThirdPartySyncService extends AbstractService
         final List<MergedHudEntry> entries = buildMergedHudEntries(dimension, null, playerName);
         if (!entries.isEmpty())
         {
-            final int width = 176;
-            int y = 8;
-            final int x = gui.guiWidth() - width - 8;
             final int rows = Math.min(10, entries.size());
-            gui.fill(x - 4, y - 4, x + width, y + 12 + rows * 10, 0x66000000);
-            gui.text(mc.font, "Syncmatica", x, y, 0xFFFFFFFF);
-            y += 12;
+            final int lineHeight = 16;
+            final int margin = 2;
+            final int titleHeight = 12;
+            final int width = calculateHudWidth(mc, entries, rows);
+            final int x = gui.guiWidth() - width - 8;
+            final int y = 8;
+
+            gui.fill(x - margin, y - margin, x + width + margin, y + titleHeight + rows * lineHeight + margin, 0xA0000000);
+            gui.text(mc.font, "Syncmatica", x + 2, y + 2, 0xFFFFFFFF);
+
+            int rowY = y + titleHeight;
             for (int i = 0; i < rows; i++)
             {
                 final MergedHudEntry entry = entries.get(i);
-                final String line = trimHudLine(entry.displayName + " " + entry.collected + "/" + entry.reserved + "/" + entry.required + " " + projectTags(entry), 28);
-                gui.text(mc.font, line, x, y, entry.claimedByMe ? 0xFF77DD77 : 0xFFE0E0E0);
-                y += 10;
+                renderHudEntry(gui, mc, entry, x, rowY, width);
+                rowY += lineHeight;
             }
         }
 
         renderAdvancedHud(gui, mc);
+    }
+
+    private int calculateHudWidth(final Minecraft mc, final List<MergedHudEntry> entries, final int rows)
+    {
+        int maxNameWidth = mc.font.width("Syncmatica");
+        int maxCountWidth = 0;
+        int maxTagWidth = 0;
+        for (int i = 0; i < rows; i++)
+        {
+            final MergedHudEntry entry = entries.get(i);
+            maxNameWidth = Math.max(maxNameWidth, mc.font.width(trimHudLine(entry.displayName, 26)));
+            maxCountWidth = Math.max(maxCountWidth, mc.font.width(formatHudCounts(entry)));
+            maxTagWidth = Math.max(maxTagWidth, mc.font.width(trimHudLine(projectTags(entry), 24)));
+        }
+        return Math.max(176, Math.min(320, 24 + maxNameWidth + 12 + maxCountWidth + 8 + maxTagWidth));
+    }
+
+    private void renderHudEntry(final GuiGraphicsExtractor gui, final Minecraft mc, final MergedHudEntry entry, final int x, final int y, final int width)
+    {
+        final ItemStack stack = stackForItemId(entry.itemId);
+        final String name = trimHudLine(entry.displayName, 26);
+        final String counts = formatHudCounts(entry);
+        final String tags = trimHudLine(projectTags(entry), 24);
+        final int tagWidth = mc.font.width(tags);
+        final int countWidth = mc.font.width(counts);
+        final int tagX = x + width - tagWidth - 2;
+        final int countX = tagX - countWidth - 8;
+
+        gui.fill(x, y, x + 16, y + 16, 0x20FFFFFF);
+        if (!stack.isEmpty())
+        {
+            gui.item(stack, x, y);
+        }
+
+        gui.text(mc.font, name, x + 20, y + 4, entry.claimedByMe ? 0xFF77DD77 : 0xFFFFFFFF);
+        renderColoredCounts(gui, mc, entry, countX, y + 4);
+        gui.text(mc.font, tags, tagX, y + 4, 0xFFB8B8B8);
+    }
+
+    private void renderColoredCounts(final GuiGraphicsExtractor gui, final Minecraft mc, final MergedHudEntry entry, final int x, final int y)
+    {
+        int cursor = x;
+        final String collected = String.valueOf(entry.collected);
+        final String reserved = String.valueOf(entry.reserved);
+        final String required = String.valueOf(entry.required);
+
+        cursor = drawHudCountSegment(gui, mc, collected, cursor, y, collectedColor(entry));
+        cursor = drawHudCountSegment(gui, mc, "/", cursor, y, 0xFFAAAAAA);
+        cursor = drawHudCountSegment(gui, mc, reserved, cursor, y, entry.claimedByMe ? 0xFF77DD77 : 0xFFFFD54F);
+        cursor = drawHudCountSegment(gui, mc, "/", cursor, y, 0xFFAAAAAA);
+        drawHudCountSegment(gui, mc, required, cursor, y, 0xFFE0E0E0);
+    }
+
+    private int drawHudCountSegment(final GuiGraphicsExtractor gui, final Minecraft mc, final String text, final int x, final int y, final int color)
+    {
+        gui.text(mc.font, text, x, y, color);
+        return x + mc.font.width(text);
+    }
+
+    private String formatHudCounts(final MergedHudEntry entry)
+    {
+        return entry.collected + "/" + entry.reserved + "/" + entry.required;
+    }
+
+    private int collectedColor(final MergedHudEntry entry)
+    {
+        if (entry.collected >= entry.required)
+        {
+            return 0xFF55FF55;
+        }
+        return entry.collected > 0 ? 0xFFFFD54F : 0xFFFF5555;
+    }
+
+    private ItemStack stackForItemId(final String itemId)
+    {
+        if (itemId == null || itemId.isBlank())
+        {
+            return ItemStack.EMPTY;
+        }
+
+        final Identifier id = Identifier.tryParse(itemId);
+        if (id == null)
+        {
+            return ItemStack.EMPTY;
+        }
+        final Item item = BuiltInRegistries.ITEM.getValue(id);
+        return item != null ? new ItemStack(item) : ItemStack.EMPTY;
     }
 
     public int getClaimHighlightColor(final ItemStack stack, final String playerName)
@@ -737,6 +922,10 @@ public class ThirdPartySyncService extends AbstractService
                 for (int dz = -radius; dz <= radius && scanned < maxContainersPerCycle; dz++)
                 {
                     final BlockPos pos = playerPos.offset(dx, dy, dz);
+                    if (!advancedMode && !isWithinStorageActivationDistance(pos))
+                    {
+                        continue;
+                    }
                     final BlockEntity blockEntity = mc.level.getBlockEntity(pos);
                     final boolean inAnyZone = isInsideAnyEnabledZone(dimension, pos);
                     if (!(blockEntity instanceof Container container) || !isReachableContainer(player, pos) || (!advancedMode && !inAnyZone))
@@ -744,8 +933,23 @@ public class ThirdPartySyncService extends AbstractService
                         continue;
                     }
 
-                    final Map<String, Integer> contents = collectContainerContents(container);
                     final String containerId = containerId(dimension, pos);
+                    if (isContainerInCooldown(containerId, nowMs))
+                    {
+                        continue;
+                    }
+
+                    final Map<String, Integer> contents;
+                    try
+                    {
+                        contents = collectContainerContents(container);
+                    }
+                    catch (final Exception e)
+                    {
+                        recordScanFailure(containerId, dimension, pos, e.getLocalizedMessage(), nowMs);
+                        cacheChanged = true;
+                        continue;
+                    }
                     final String contentHash = Integer.toHexString(contents.hashCode());
                     cacheChanged |= updateScanCache(containerId, dimension, pos, contentHash, nowMs);
                     if (inAnyZone)
@@ -984,6 +1188,43 @@ public class ThirdPartySyncService extends AbstractService
         return false;
     }
 
+    private boolean isContainerInCooldown(final String containerId, final long nowMs)
+    {
+        final JsonObject containers = getScanCacheSection();
+        if (!containers.has(containerId) || !containers.get(containerId).isJsonObject())
+        {
+            return false;
+        }
+
+        final JsonObject entry = containers.getAsJsonObject(containerId);
+        if (!"denied".equals(readString(entry, "scanState")))
+        {
+            return false;
+        }
+        final long retryAfter = entry.has("retryAfterMs") && entry.get("retryAfterMs").isJsonPrimitive()
+                ? entry.get("retryAfterMs").getAsLong()
+                : 0L;
+        return nowMs < retryAfter;
+    }
+
+    private void recordScanFailure(final String containerId, final String dimension, final BlockPos pos, final String reason, final long nowMs)
+    {
+        final JsonObject containers = getScanCacheSection();
+        final JsonObject entry = containers.has(containerId) && containers.get(containerId).isJsonObject()
+                ? containers.getAsJsonObject(containerId)
+                : new JsonObject();
+        entry.addProperty("containerId", containerId);
+        entry.addProperty("dimension", dimension);
+        entry.addProperty("x", pos.getX());
+        entry.addProperty("y", pos.getY());
+        entry.addProperty("z", pos.getZ());
+        entry.addProperty("scanState", "denied");
+        entry.addProperty("failureReason", reason == null ? "" : reason);
+        entry.addProperty("lastFailedAt", Instant.ofEpochMilli(nowMs).toString());
+        entry.addProperty("retryAfterMs", nowMs + Math.max(denyRetryCooldownMs, permissionFailCooldownMs));
+        containers.add(containerId, entry);
+    }
+
     private boolean isInsideAnyEnabledZone(final String dimension, final BlockPos pos)
     {
         synchronized (this)
@@ -1008,6 +1249,10 @@ public class ThirdPartySyncService extends AbstractService
     {
         synchronized (this)
         {
+            if (!getClaimQueue().isEmpty())
+            {
+                return true;
+            }
             for (final ThirdPartyProjectRecord record : projects.values())
             {
                 if (record.isPendingImport() || record.isPendingCollected())
@@ -1115,6 +1360,7 @@ public class ThirdPartySyncService extends AbstractService
         executor.submit(() -> {
             synchronized (this)
             {
+                flushPendingClaims();
                 for (final ThirdPartyProjectRecord record : projects.values())
                 {
                     syncRecord(record);
@@ -1233,6 +1479,199 @@ public class ThirdPartySyncService extends AbstractService
             }
         }
         return null;
+    }
+
+    private void mergeProjectList(final JsonObject response)
+    {
+        if (response == null)
+        {
+            return;
+        }
+
+        final JsonArray arr;
+        if (response.has("projects") && response.get("projects").isJsonArray())
+        {
+            arr = response.getAsJsonArray("projects");
+        }
+        else if (response.has("items") && response.get("items").isJsonArray())
+        {
+            arr = response.getAsJsonArray("items");
+        }
+        else
+        {
+            return;
+        }
+
+        for (final JsonElement element : arr)
+        {
+            if (element == null || !element.isJsonObject())
+            {
+                continue;
+            }
+            final JsonObject obj = element.getAsJsonObject();
+            final Project project = Project.fromJson(obj.has("project") && obj.get("project").isJsonObject() ? obj.getAsJsonObject("project") : obj);
+            if (project.projectId.isBlank())
+            {
+                continue;
+            }
+
+            final String key = remoteRecordKey(project.projectId);
+            final ThirdPartyProjectRecord record = projects.computeIfAbsent(key, ignored -> new ThirdPartyProjectRecord(project.projectId, null));
+            record.setProjectKey(key);
+            record.mergeProjectDetails(obj);
+            if (record.getProject().projectId.isBlank())
+            {
+                record.setProject(project);
+            }
+            record.setProjectId(project.projectId);
+            record.setUpdatedAt(project.updatedAt);
+            if (!project.status.isBlank())
+            {
+                record.setStatus(project.status);
+            }
+        }
+    }
+
+    private void flushPendingClaims()
+    {
+        final JsonArray queue = getClaimQueue();
+        if (queue.isEmpty() || apiClient == null || !apiClient.isConfigured())
+        {
+            return;
+        }
+
+        final JsonArray remaining = new JsonArray();
+        for (final JsonElement element : queue)
+        {
+            if (element == null || !element.isJsonObject())
+            {
+                continue;
+            }
+            final JsonObject queued = element.getAsJsonObject();
+            final String projectId = readString(queued, "projectId");
+            final JsonObject body = queued.has("body") && queued.get("body").isJsonObject()
+                    ? queued.getAsJsonObject("body")
+                    : new JsonObject();
+            try
+            {
+                final JsonObject response = apiClient.upsertClaim(projectId, body);
+                final ThirdPartyProjectRecord record = getProjectByProjectId(projectId);
+                if (record != null)
+                {
+                    record.mergeProjectDetails(response);
+                }
+            }
+            catch (final Exception e)
+            {
+                if (!isConflict(e))
+                {
+                    remaining.add(queued);
+                }
+                final ThirdPartyProjectRecord record = getProjectByProjectId(projectId);
+                if (record != null)
+                {
+                    record.setLastSyncMessage(e.getMessage());
+                    if (isConflict(e))
+                    {
+                        refreshProject(record);
+                    }
+                }
+            }
+        }
+        claimsCache.add("claims", remaining);
+        saveClaims();
+    }
+
+    private void queueClaim(final String projectId, final JsonObject body)
+    {
+        final JsonObject queued = new JsonObject();
+        queued.addProperty("projectId", projectId);
+        queued.add("body", body.deepCopy());
+        queued.addProperty("queuedAt", now());
+        getClaimQueue().add(queued);
+        saveClaims();
+    }
+
+    private JsonArray getClaimQueue()
+    {
+        if (!claimsCache.has("claims") || !claimsCache.get("claims").isJsonArray())
+        {
+            claimsCache.add("claims", new JsonArray());
+        }
+        return claimsCache.getAsJsonArray("claims");
+    }
+
+    private void saveClaims()
+    {
+        if (store != null)
+        {
+            store.saveClaims(claimsCache);
+        }
+    }
+
+    private int resolveClaimAmount(final ThirdPartyProjectRecord record, final String materialKey, final int requestedAmount)
+    {
+        if (requestedAmount > 0)
+        {
+            return allowClaimOverRemaining ? requestedAmount : Math.min(requestedAmount, getRemainingClaimable(record, materialKey));
+        }
+
+        final int remaining = getRemainingClaimable(record, materialKey);
+        if ("smart_stack".equals(defaultClaimAmountMode) && remaining > 64)
+        {
+            return 64;
+        }
+        return remaining;
+    }
+
+    private boolean isWithinStorageActivationDistance(final BlockPos pos)
+    {
+        final Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.player == null || pos == null)
+        {
+            return false;
+        }
+        return mc.player.blockPosition().distSqr(pos) <= (double) activationDistance * activationDistance;
+    }
+
+    private String getRecordKey(final ThirdPartyProjectRecord record)
+    {
+        if (record == null)
+        {
+            return "";
+        }
+        if (record.getPlacement() != null)
+        {
+            return getLocalRecordKey(record.getPlacement());
+        }
+        return remoteRecordKey(record.getProjectId());
+    }
+
+    private String remoteRecordKey(final String projectId)
+    {
+        return "remote:" + projectId;
+    }
+
+    private static boolean isConflict(final Exception e)
+    {
+        return e != null && e.getMessage() != null && e.getMessage().contains("HTTP 409");
+    }
+
+    private static String readString(final JsonObject obj, final String key)
+    {
+        return obj != null && obj.has(key) && !obj.get(key).isJsonNull() ? obj.get(key).getAsString() : "";
+    }
+
+    private String currentPlayerName()
+    {
+        final Minecraft mc = Minecraft.getInstance();
+        return mc != null && mc.player != null ? mc.player.getName().getString() : "";
+    }
+
+    private String currentDimension()
+    {
+        final Minecraft mc = Minecraft.getInstance();
+        return mc != null && mc.level != null ? mc.level.dimension().identifier().toString() : "";
     }
 
     private int getRemainingClaimable(final ThirdPartyProjectRecord record, final String materialKey)
