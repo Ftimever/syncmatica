@@ -75,6 +75,14 @@ public class ThirdPartyProjectRecord
             {
                 this.projectId = project.projectId;
             }
+            if (placement != null)
+            {
+                if (isBlankOrUnnamed(this.project.name))
+                {
+                    this.project.name = fallbackPlacementName(placement);
+                }
+                placement.setDisplayName(this.project.name);
+            }
         }
     }
 
@@ -88,9 +96,14 @@ public class ThirdPartyProjectRecord
         this.placement = placement;
         if (placement != null)
         {
+            final String placementName = fallbackPlacementName(placement);
             project.placementId = placement.getId().toString();
             project.schematicHash = placement.getHash().toString();
-            project.name = placement.getName();
+            if (isBlankOrUnnamed(project.name))
+            {
+                project.name = placementName;
+            }
+            placement.setDisplayName(project.name);
             project.dimension = placement.getDimension();
             project.originX = placement.getPosition().getX();
             project.originY = placement.getPosition().getY();
@@ -99,6 +112,19 @@ public class ThirdPartyProjectRecord
             if (project.projectId == null || project.projectId.isBlank())
             {
                 project.projectId = projectId;
+            }
+        }
+    }
+
+    public void setProjectName(final String name)
+    {
+        final String clean = name == null ? "" : name.trim();
+        if (!clean.isBlank())
+        {
+            project.name = clean;
+            if (placement != null)
+            {
+                placement.setDisplayName(clean);
             }
         }
     }
@@ -347,6 +373,38 @@ public class ThirdPartyProjectRecord
         {
             zones.addAll(next);
         }
+    }
+
+    private static String fallbackPlacementName(final ServerPlacement placement)
+    {
+        if (placement == null)
+        {
+            return "";
+        }
+        final String display = placement.getName();
+        if (!isBlankOrUnnamed(display))
+        {
+            return display;
+        }
+        String fileName = placement.getCleanFileName();
+        if (fileName.endsWith(".litematic"))
+        {
+            fileName = fileName.substring(0, fileName.length() - ".litematic".length());
+        }
+        return isBlankOrUnnamed(fileName) ? placement.getId().toString() : fileName;
+    }
+
+    private static boolean isBlankOrUnnamed(final String value)
+    {
+        if (value == null)
+        {
+            return true;
+        }
+        final String trimmed = value.trim();
+        return trimmed.isBlank()
+                || "?".equals(trimmed)
+                || "unnamed".equalsIgnoreCase(trimmed)
+                || "未命名".equals(trimmed);
     }
 
 }

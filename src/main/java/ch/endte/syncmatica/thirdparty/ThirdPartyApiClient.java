@@ -51,6 +51,11 @@ public class ThirdPartyApiClient
         return getJson("/api/v1/projects/" + projectId);
     }
 
+    public JsonObject updateProject(final String projectId, final JsonObject body) throws IOException, InterruptedException
+    {
+        return postJson("/api/v1/projects/" + projectId, body);
+    }
+
     public JsonObject downloadSchematic(final String projectId) throws IOException, InterruptedException
     {
         return getJson("/api/v1/projects/" + projectId + "/schematic");

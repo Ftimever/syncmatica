@@ -23,14 +23,19 @@ import fi.dy.masa.litematica.materials.MaterialListUtils;
 import fi.dy.masa.malilib.gui.Message;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.Container;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.ItemContainerContents;
@@ -39,6 +44,7 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import org.lwjgl.glfw.GLFW;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -137,14 +143,19 @@ public class ThirdPartySyncService extends AbstractService
     private boolean uploadOnlyAggregatedCollected = true;
 
     private boolean advancedStockingEnabled = false;
+    private String advancedStockingMode = "v1_scan";
     private boolean advancedScanContainers = true;
     private int advancedScanIntervalMs = 1000;
+    private int advancedSafeActionIntervalMs = 1600;
     private int maxContainersPerCycle = 6;
     private boolean rayLineEnabled = true;
     private int lineMaxDistanceTenths = 45;
     private boolean showContainerPreview = true;
+    private int containerPreviewKeyCode = GLFW.GLFW_KEY_LEFT_ALT;
     private boolean highlightClaimedItems = true;
     private boolean useClaimColors = true;
+    private int claimHighlightDefaultColorRgb = 0xFFD54F;
+    private boolean advancedAutoTakeArmed = false;
     private int permissionFailCooldownMs = 60000;
     private boolean nonZoneScansAffectProjectCollected = false;
 
@@ -157,14 +168,26 @@ public class ThirdPartySyncService extends AbstractService
     private ExecutorService executor;
     private final Map<String, ThirdPartyProjectRecord> projects = new LinkedHashMap<>();
     private final Map<String, Map<String, Integer>> scannedZoneContents = new LinkedHashMap<>();
+    private final Map<String, Map<String, Integer>> advancedContainerSnapshots = new LinkedHashMap<>();
+    private final Map<String, List<ItemStack>> advancedContainerSlotSnapshots = new LinkedHashMap<>();
     private final Map<String, AdvancedContainerHit> advancedHits = new LinkedHashMap<>();
     private JsonObject scanCache = new JsonObject();
     private JsonObject claimsCache = new JsonObject();
     private long lastAggregateRecomputeMs = 0L;
     private long lastStorageZoneScanMs = 0L;
     private long lastAdvancedScanMs = 0L;
+    private long lastAdvancedOpenMs = 0L;
     private long lastPendingFlushMs = 0L;
+    private int advancedScanCursorIndex = 0;
     private String connectedNotificationBaseUrl = "";
+    private String pendingAdvancedOpenContainerId = "";
+    private String pendingAdvancedOpenDimension = "";
+    private BlockPos pendingAdvancedOpenPos;
+    private long pendingAdvancedOpenStartedMs = 0L;
+    private String storageZonePreviewProjectId = "";
+    private String storageZonePreviewDimension = "";
+    private BlockPos storageZonePreviewFirstCorner;
+    private BlockPos storageZonePreviewSecondCorner;
 
     @Override
     public void getDefaultConfiguration(final IServiceConfiguration configuration)
@@ -211,14 +234,19 @@ public class ThirdPartySyncService extends AbstractService
         configuration.saveInteger("recomputeIntervalMs", 5000);
         configuration.saveBoolean("uploadOnlyAggregatedCollected", true);
         configuration.saveBoolean("advancedStockingEnabled", false);
+        configuration.saveString("advancedStockingMode", "v1_scan");
         configuration.saveBoolean("advancedScanContainers", true);
         configuration.saveInteger("advancedScanIntervalMs", 1000);
+        configuration.saveInteger("advancedSafeActionIntervalMs", 1600);
         configuration.saveInteger("maxContainersPerCycle", 6);
         configuration.saveBoolean("rayLineEnabled", true);
         configuration.saveInteger("lineMaxDistanceTenths", 45);
         configuration.saveBoolean("showContainerPreview", true);
+        configuration.saveInteger("containerPreviewKeyCode", GLFW.GLFW_KEY_LEFT_ALT);
         configuration.saveBoolean("highlightClaimedItems", true);
         configuration.saveBoolean("useClaimColors", true);
+        configuration.saveInteger("claimHighlightDefaultColorRgb", 0xFFD54F);
+        configuration.saveBoolean("advancedAutoTakeArmed", false);
         configuration.saveInteger("permissionFailCooldownMs", 60000);
         configuration.saveBoolean("nonZoneScansAffectProjectCollected", false);
         configuration.saveBoolean("logThirdPartyRequests", false);
@@ -277,14 +305,19 @@ public class ThirdPartySyncService extends AbstractService
         configuration.loadInteger("recomputeIntervalMs", value -> recomputeIntervalMs = value);
         configuration.loadBoolean("uploadOnlyAggregatedCollected", value -> uploadOnlyAggregatedCollected = value);
         configuration.loadBoolean("advancedStockingEnabled", value -> advancedStockingEnabled = value);
+        configuration.loadString("advancedStockingMode", value -> advancedStockingMode = normalizeAdvancedMode(value));
         configuration.loadBoolean("advancedScanContainers", value -> advancedScanContainers = value);
         configuration.loadInteger("advancedScanIntervalMs", value -> advancedScanIntervalMs = value);
+        configuration.loadInteger("advancedSafeActionIntervalMs", value -> advancedSafeActionIntervalMs = value);
         configuration.loadInteger("maxContainersPerCycle", value -> maxContainersPerCycle = value);
         configuration.loadBoolean("rayLineEnabled", value -> rayLineEnabled = value);
         configuration.loadInteger("lineMaxDistanceTenths", value -> lineMaxDistanceTenths = value);
         configuration.loadBoolean("showContainerPreview", value -> showContainerPreview = value);
+        configuration.loadInteger("containerPreviewKeyCode", value -> containerPreviewKeyCode = value);
         configuration.loadBoolean("highlightClaimedItems", value -> highlightClaimedItems = value);
         configuration.loadBoolean("useClaimColors", value -> useClaimColors = value);
+        configuration.loadInteger("claimHighlightDefaultColorRgb", value -> claimHighlightDefaultColorRgb = clampRgb(value));
+        configuration.loadBoolean("advancedAutoTakeArmed", value -> advancedAutoTakeArmed = value);
         configuration.loadInteger("permissionFailCooldownMs", value -> permissionFailCooldownMs = value);
         configuration.loadBoolean("nonZoneScansAffectProjectCollected", value -> nonZoneScansAffectProjectCollected = value);
         configuration.loadBoolean("logThirdPartyRequests", value -> logThirdPartyRequests = value);
@@ -558,6 +591,10 @@ public class ThirdPartySyncService extends AbstractService
         );
         record.setProjectKey(recordKey);
         record.setPlacement(placement);
+        if (isBlankOrUnnamed(record.getProject().name))
+        {
+            record.setProjectName(defaultProjectName(placement));
+        }
         if (extractedMaterials != null && !extractedMaterials.isEmpty())
         {
             record.getMaterials().clear();
@@ -1051,6 +1088,64 @@ public class ThirdPartySyncService extends AbstractService
         }
     }
 
+    public void renameProject(final ThirdPartyProjectRecord record, final String name)
+    {
+        if (!isThirdPartyMode() || record == null || executor == null)
+        {
+            return;
+        }
+        final String cleanName = cleanProjectName(name, record.getPlacement());
+        if (cleanName.isBlank())
+        {
+            return;
+        }
+
+        executor.submit(() -> {
+            synchronized (this)
+            {
+                final String previousName = record.getProject().name;
+                record.setProjectName(cleanName);
+                if (record.getPlacement() != null)
+                {
+                    LitematicManager.getInstance().updateRenderedName(record.getPlacement());
+                }
+                saveProjects();
+
+                if (apiClient == null || !apiClient.isConfigured() || record.getProjectId().isBlank())
+                {
+                    return;
+                }
+
+                try
+                {
+                    final JsonObject body = new JsonObject();
+                    body.addProperty("name", cleanName);
+                    final JsonObject response = apiClient.updateProject(record.getProjectId(), body);
+                    notifyThirdPartyConnectionSucceeded();
+                    record.mergeProjectDetails(response);
+                    mergeServerPlacement(record, response);
+                    if (record.getPlacement() != null)
+                    {
+                        LitematicManager.getInstance().updateRenderedName(record.getPlacement());
+                    }
+                    saveProjects();
+                    showMessage(Message.MessageType.SUCCESS, "syncmatica.success.third_party_project_renamed", cleanName);
+                }
+                catch (final Exception e)
+                {
+                    record.setProjectName(previousName);
+                    record.setLastSyncMessage(e.getMessage());
+                    if (record.getPlacement() != null)
+                    {
+                        LitematicManager.getInstance().updateRenderedName(record.getPlacement());
+                    }
+                    saveProjects();
+                    showMessage(Message.MessageType.ERROR, "syncmatica.error.third_party_project_rename_failed", e.getMessage());
+                }
+            }
+        });
+    }
+
     public void clientTick()
     {
         if (!isThirdPartyMode() || context == null || context.isServer())
@@ -1059,6 +1154,7 @@ public class ThirdPartySyncService extends AbstractService
         }
 
         final long nowMs = System.currentTimeMillis();
+        handleAdvancedOpenResult(nowMs);
         final boolean shouldScanStorage = storageZonesEnabled && includeStorageZones && nowMs - lastStorageZoneScanMs >= storageZoneScanIntervalMs;
         final boolean shouldScanAdvanced = advancedStockingEnabled && advancedScanContainers && nowMs - lastAdvancedScanMs >= advancedScanIntervalMs;
         if (shouldScanStorage || shouldScanAdvanced)
@@ -1090,9 +1186,33 @@ public class ThirdPartySyncService extends AbstractService
         }
     }
 
+    public boolean isSuppressingAdvancedContainerScreen()
+    {
+        return !pendingAdvancedOpenContainerId.isBlank();
+    }
+
+    public void setStorageZonePreview(final String projectId, final String dimension, final BlockPos firstCorner, final BlockPos secondCorner)
+    {
+        storageZonePreviewProjectId = projectId == null ? "" : projectId;
+        storageZonePreviewDimension = dimension == null ? "" : dimension;
+        storageZonePreviewFirstCorner = firstCorner == null ? null : firstCorner.immutable();
+        storageZonePreviewSecondCorner = secondCorner == null ? null : secondCorner.immutable();
+    }
+
+    public void clearStorageZonePreview(final String projectId)
+    {
+        if (projectId == null || projectId.isBlank() || projectId.equals(storageZonePreviewProjectId))
+        {
+            storageZonePreviewProjectId = "";
+            storageZonePreviewDimension = "";
+            storageZonePreviewFirstCorner = null;
+            storageZonePreviewSecondCorner = null;
+        }
+    }
+
     public void renderHud(final GuiGraphicsExtractor gui)
     {
-        if (!hudEnabled || gui == null)
+        if (gui == null)
         {
             return;
         }
@@ -1105,30 +1225,43 @@ public class ThirdPartySyncService extends AbstractService
 
         final String dimension = mc.level.dimension().identifier().toString();
         final String playerName = mc.player.getName().getString();
-        final List<MergedHudEntry> entries = buildMergedHudEntries(dimension, null, playerName);
-        if (!entries.isEmpty())
+        if (hudEnabled)
         {
-            final int rows = Math.min(10, entries.size());
-            final int lineHeight = 16;
-            final int margin = 2;
-            final int titleHeight = 12;
-            final int width = calculateHudWidth(mc, entries, rows);
-            final int x = gui.guiWidth() - width - 8;
-            final int y = 8;
-
-            gui.fill(x - margin, y - margin, x + width + margin, y + titleHeight + rows * lineHeight + margin, 0xA0000000);
-            gui.text(mc.font, "Syncmatica", x + 2, y + 2, 0xFFFFFFFF);
-
-            int rowY = y + titleHeight;
-            for (int i = 0; i < rows; i++)
+            final List<MergedHudEntry> entries = buildMergedHudEntries(dimension, null, playerName);
+            if (!entries.isEmpty())
             {
-                final MergedHudEntry entry = entries.get(i);
-                renderHudEntry(gui, mc, entry, x, rowY, width);
-                rowY += lineHeight;
+                final int rows = Math.min(10, entries.size());
+                final int lineHeight = 16;
+                final int margin = 2;
+                final int titleHeight = 12;
+                final int width = calculateHudWidth(mc, entries, rows);
+                final int x = gui.guiWidth() - width - 8;
+                final int y = 8;
+
+                gui.fill(x - margin, y - margin, x + width + margin, y + titleHeight + rows * lineHeight + margin, 0xA0000000);
+                gui.text(mc.font, "Syncmatica", x + 2, y + 2, 0xFFFFFFFF);
+
+                int rowY = y + titleHeight;
+                for (int i = 0; i < rows; i++)
+                {
+                    final MergedHudEntry entry = entries.get(i);
+                    renderHudEntry(gui, mc, entry, x, rowY, width);
+                    rowY += lineHeight;
+                }
             }
         }
 
         renderAdvancedHud(gui, mc);
+        renderStorageZonePreview(gui, mc);
+    }
+
+    public void renderStorageZonePreview(final GuiGraphicsExtractor gui)
+    {
+        final Minecraft mc = Minecraft.getInstance();
+        if (gui != null && mc != null)
+        {
+            renderStorageZonePreview(gui, mc);
+        }
     }
 
     private int calculateHudWidth(final Minecraft mc, final List<MergedHudEntry> entries, final int rows)
@@ -1251,7 +1384,7 @@ public class ThirdPartySyncService extends AbstractService
                     if ((claim.materialKey.equals(materialKey) || claim.materialKey.equals(itemId))
                             && (playerName == null || playerName.isBlank() || claim.assignee.equalsIgnoreCase(playerName)))
                     {
-                        return useClaimColors ? colorForClaim(claim) : 0xFFFFD54F;
+                        return useClaimColors ? colorForClaim(claim) : defaultClaimHighlightColor();
                     }
                 }
             }
@@ -1269,74 +1402,383 @@ public class ThirdPartySyncService extends AbstractService
 
         final Player player = mc.player;
         final String dimension = mc.level.dimension().identifier().toString();
-        final int radius = Math.max(1, (int) Math.ceil(player.blockInteractionRange()));
+        final int radius = advancedMode ? advancedScanRadius(player) : Math.max(1, (int) Math.ceil(player.blockInteractionRange()));
         final BlockPos playerPos = player.blockPosition();
         int scanned = 0;
         boolean cacheChanged = false;
 
         if (advancedMode)
         {
-            advancedHits.clear();
+            advancedHits.entrySet().removeIf(entry -> nowMs - entry.getValue().scannedAt > Math.max(staleAfterMs, 30000));
         }
 
-        for (int dx = -radius; dx <= radius && scanned < maxContainersPerCycle; dx++)
+        final int side = radius * 2 + 1;
+        final int plane = side * side;
+        final int totalPositions = plane * side;
+        final int startIndex = advancedMode ? Math.floorMod(advancedScanCursorIndex, totalPositions) : 0;
+        final int positionBudget = advancedMode
+                ? Math.min(totalPositions, Math.max(128, Math.max(1, maxContainersPerCycle) * 512))
+                : totalPositions;
+        int visited = 0;
+
+        for (; visited < positionBudget && scanned < maxContainersPerCycle; visited++)
         {
-            for (int dy = -radius; dy <= radius && scanned < maxContainersPerCycle; dy++)
+            final int scanIndex = advancedMode ? (startIndex + visited) % totalPositions : visited;
+            final int dx = scanIndex % side - radius;
+            final int dy = (scanIndex / side) % side - radius;
+            final int dz = scanIndex / plane - radius;
+            final BlockPos pos = playerPos.offset(dx, dy, dz);
+            if (!advancedMode && !isWithinStorageActivationDistance(pos))
             {
-                for (int dz = -radius; dz <= radius && scanned < maxContainersPerCycle; dz++)
+                continue;
+            }
+            final BlockEntity blockEntity = mc.level.getBlockEntity(pos);
+            final boolean inAnyZone = isInsideAnyEnabledZone(dimension, pos);
+            final boolean reachable = isReachableContainer(player, pos);
+            final boolean allowUnrestrictedScan = advancedMode && isAdvancedV3() && advancedAutoTakeArmed;
+            if (!(blockEntity instanceof Container container) || (!reachable && !allowUnrestrictedScan) || (!advancedMode && !inAnyZone))
+            {
+                continue;
+            }
+
+            final String containerId = containerId(dimension, pos);
+            if (isContainerInCooldown(containerId, nowMs))
+            {
+                continue;
+            }
+
+            if (advancedMode && (reachable || (isAdvancedV3() && advancedAutoTakeArmed)) && shouldOpenContainerForSnapshot(containerId, nowMs))
+            {
+                tryOpenContainerForSnapshot(mc, player, dimension, pos, containerId, nowMs);
+            }
+
+            final Map<String, Integer> contents;
+            final List<ItemStack> slotContents;
+            try
+            {
+                contents = collectContainerContents(container);
+                slotContents = collectContainerStacks(container);
+            }
+            catch (final Exception e)
+            {
+                recordScanFailure(containerId, dimension, pos, e.getLocalizedMessage(), nowMs);
+                cacheChanged = true;
+                continue;
+            }
+            final String contentHash = Integer.toHexString(contents.hashCode());
+            cacheChanged |= updateScanCache(containerId, dimension, pos, contentHash, nowMs);
+            if (inAnyZone)
+            {
+                scannedZoneContents.put(containerId, contents);
+            }
+            if (advancedMode)
+            {
+                final boolean hasCachedSnapshot = advancedContainerSnapshots.containsKey(containerId);
+                if (!contents.isEmpty() || !hasCachedSnapshot)
                 {
-                    final BlockPos pos = playerPos.offset(dx, dy, dz);
-                    if (!advancedMode && !isWithinStorageActivationDistance(pos))
-                    {
-                        continue;
-                    }
-                    final BlockEntity blockEntity = mc.level.getBlockEntity(pos);
-                    final boolean inAnyZone = isInsideAnyEnabledZone(dimension, pos);
-                    if (!(blockEntity instanceof Container container) || !isReachableContainer(player, pos) || (!advancedMode && !inAnyZone))
-                    {
-                        continue;
-                    }
-
-                    final String containerId = containerId(dimension, pos);
-                    if (isContainerInCooldown(containerId, nowMs))
-                    {
-                        continue;
-                    }
-
-                    final Map<String, Integer> contents;
-                    try
-                    {
-                        contents = collectContainerContents(container);
-                    }
-                    catch (final Exception e)
-                    {
-                        recordScanFailure(containerId, dimension, pos, e.getLocalizedMessage(), nowMs);
-                        cacheChanged = true;
-                        continue;
-                    }
-                    final String contentHash = Integer.toHexString(contents.hashCode());
-                    cacheChanged |= updateScanCache(containerId, dimension, pos, contentHash, nowMs);
-                    if (inAnyZone)
-                    {
-                        scannedZoneContents.put(containerId, contents);
-                    }
-                    if (advancedMode)
-                    {
-                        final Map<String, Integer> matches = findAdvancedMatches(contents, player.getName().getString());
-                        if (!matches.isEmpty())
-                        {
-                            advancedHits.put(containerId, new AdvancedContainerHit(pos, matches, nowMs));
-                        }
-                    }
-                    scanned++;
+                    advancedContainerSnapshots.put(containerId, contents);
+                    advancedContainerSlotSnapshots.put(containerId, slotContents);
+                }
+                final Map<String, Integer> advancedContents = contents.isEmpty() && hasCachedSnapshot
+                        ? advancedContainerSnapshots.get(containerId)
+                        : contents;
+                final Map<String, Integer> matches = findAdvancedMatches(advancedContents, player.getName().getString());
+                if (!matches.isEmpty())
+                {
+                    advancedHits.put(containerId, new AdvancedContainerHit(containerId, dimension, pos, matches, nowMs));
+                }
+                else
+                {
+                    advancedHits.remove(containerId);
                 }
             }
+            scanned++;
+        }
+
+        if (advancedMode)
+        {
+            advancedScanCursorIndex = (startIndex + Math.max(1, visited)) % totalPositions;
         }
 
         if (cacheChanged && store != null)
         {
             store.saveScanCache(scanCache);
         }
+    }
+
+    private boolean shouldOpenContainerForSnapshot(final String containerId, final long nowMs)
+    {
+        if (!advancedStockingEnabled || containerId == null || containerId.isBlank())
+        {
+            return false;
+        }
+        if (!pendingAdvancedOpenContainerId.isBlank())
+        {
+            return false;
+        }
+        if (advancedContainerSnapshots.containsKey(containerId) && nowMs - lastAdvancedOpenMs < Math.max(advancedSafeActionIntervalMs, advancedScanIntervalMs))
+        {
+            return false;
+        }
+        return nowMs - lastAdvancedOpenMs >= advancedOpenDelayMs();
+    }
+
+    private long advancedOpenDelayMs()
+    {
+        final long base = Math.max(800, advancedSafeActionIntervalMs);
+        final long jitter = Math.abs(System.nanoTime() % Math.max(1, base / 3));
+        if (isAdvancedV2())
+        {
+            return base + jitter;
+        }
+        if (isAdvancedV3())
+        {
+            return advancedAutoTakeArmed ? Math.max(250, base / 2) + jitter : base + jitter;
+        }
+        return base + jitter;
+    }
+
+    private void tryOpenContainerForSnapshot(final Minecraft mc, final Player player, final String dimension, final BlockPos pos, final String containerId, final long nowMs)
+    {
+        if (mc == null || mc.gameMode == null || mc.screen != null)
+        {
+            return;
+        }
+        try
+        {
+            final BlockHitResult hit = advancedOpenHitResult(mc, player, pos);
+            mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND, hit);
+            pendingAdvancedOpenContainerId = containerId;
+            pendingAdvancedOpenDimension = dimension;
+            pendingAdvancedOpenPos = pos.immutable();
+            pendingAdvancedOpenStartedMs = nowMs;
+            lastAdvancedOpenMs = nowMs;
+        }
+        catch (final Exception e)
+        {
+            recordScanFailure(containerId, dimension, pos, e.getLocalizedMessage(), nowMs);
+        }
+    }
+
+    private BlockHitResult advancedOpenHitResult(final Minecraft mc, final Player player, final BlockPos pos)
+    {
+        if (mc != null && mc.hitResult instanceof BlockHitResult hit && hit.getBlockPos().equals(pos))
+        {
+            return hit;
+        }
+
+        final Vec3 center = Vec3.atCenterOf(pos);
+        final Vec3 eyes = player.getEyePosition();
+        final Vec3 delta = eyes.subtract(center);
+        final Direction face;
+        if (Math.abs(delta.x) >= Math.abs(delta.z))
+        {
+            face = delta.x >= 0 ? Direction.EAST : Direction.WEST;
+        }
+        else
+        {
+            face = delta.z >= 0 ? Direction.SOUTH : Direction.NORTH;
+        }
+        return new BlockHitResult(center.relative(face, 0.5D), face, pos, false);
+    }
+
+    private void handleAdvancedOpenResult(final long nowMs)
+    {
+        if (pendingAdvancedOpenContainerId.isBlank())
+        {
+            return;
+        }
+
+        final Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.player == null)
+        {
+            clearPendingAdvancedOpen();
+            return;
+        }
+
+        if (mc.screen instanceof AbstractContainerScreen<?>)
+        {
+            final Map<String, Integer> contents = collectOpenContainerContents(mc.player.getInventory(), mc.player.containerMenu.slots);
+            final List<ItemStack> slotContents = collectOpenContainerStacks(mc.player.getInventory(), mc.player.containerMenu.slots);
+            cacheAdvancedContainerSnapshot(pendingAdvancedOpenContainerId, pendingAdvancedOpenDimension, pendingAdvancedOpenPos, contents, slotContents, nowMs);
+            if (advancedAutoTakeArmed && (isAdvancedV2() || isAdvancedV3()))
+            {
+                autoTakeClaimedItems(mc, nowMs);
+            }
+            mc.player.closeContainer();
+            clearPendingAdvancedOpen();
+            return;
+        }
+
+        if (nowMs - pendingAdvancedOpenStartedMs > 3500L)
+        {
+            recordScanFailure(pendingAdvancedOpenContainerId, pendingAdvancedOpenDimension, pendingAdvancedOpenPos, "open timeout", nowMs);
+            clearPendingAdvancedOpen();
+        }
+    }
+
+    private Map<String, Integer> collectOpenContainerContents(final Inventory playerInventory, final List<Slot> slots)
+    {
+        final Map<String, Integer> counts = new LinkedHashMap<>();
+        if (slots == null)
+        {
+            return counts;
+        }
+        for (final Slot slot : slots)
+        {
+            if (slot == null || slot.container == playerInventory || !slot.hasItem())
+            {
+                continue;
+            }
+            addStackCounts(counts, slot.getItem(), 0);
+        }
+        return counts;
+    }
+
+    private List<ItemStack> collectOpenContainerStacks(final Inventory playerInventory, final List<Slot> slots)
+    {
+        final List<ItemStack> stacks = new ArrayList<>();
+        if (slots == null)
+        {
+            return stacks;
+        }
+        for (final Slot slot : slots)
+        {
+            if (slot == null || slot.container == playerInventory)
+            {
+                continue;
+            }
+            stacks.add(slot.hasItem() ? slot.getItem().copy() : ItemStack.EMPTY);
+        }
+        return stacks;
+    }
+
+    private void cacheAdvancedContainerSnapshot(final String containerId, final String dimension, final BlockPos pos, final Map<String, Integer> contents, final long nowMs)
+    {
+        cacheAdvancedContainerSnapshot(containerId, dimension, pos, contents, Collections.emptyList(), nowMs);
+    }
+
+    private void cacheAdvancedContainerSnapshot(final String containerId, final String dimension, final BlockPos pos, final Map<String, Integer> contents, final List<ItemStack> slotContents, final long nowMs)
+    {
+        if (containerId == null || containerId.isBlank() || pos == null)
+        {
+            return;
+        }
+        advancedContainerSnapshots.put(containerId, contents);
+        if (slotContents != null && !slotContents.isEmpty())
+        {
+            advancedContainerSlotSnapshots.put(containerId, copyStacks(slotContents));
+        }
+        if (isInsideAnyEnabledZone(dimension, pos))
+        {
+            scannedZoneContents.put(containerId, contents);
+        }
+        final Minecraft mc = Minecraft.getInstance();
+        final String playerName = mc != null && mc.player != null ? mc.player.getName().getString() : "";
+        final Map<String, Integer> matches = findAdvancedMatches(contents, playerName);
+        if (!matches.isEmpty())
+        {
+            advancedHits.put(containerId, new AdvancedContainerHit(containerId, dimension, pos, matches, nowMs));
+        }
+        else
+        {
+            advancedHits.remove(containerId);
+        }
+        updateScanCache(containerId, dimension, pos, Integer.toHexString(contents.hashCode()), nowMs);
+        if (store != null)
+        {
+            store.saveScanCache(scanCache);
+        }
+    }
+
+    private void autoTakeClaimedItems(final Minecraft mc, final long nowMs)
+    {
+        if (mc == null || mc.gameMode == null || mc.player == null || mc.player.containerMenu == null)
+        {
+            return;
+        }
+        final int maxMoves = isAdvancedV3() ? Math.min(8, Math.max(1, maxContainersPerCycle)) : 1;
+        int moved = 0;
+        for (final Slot slot : mc.player.containerMenu.slots)
+        {
+            if (moved >= maxMoves)
+            {
+                break;
+            }
+            if (slot == null || slot.container == mc.player.getInventory() || !slot.hasItem())
+            {
+                continue;
+            }
+            if (!isClaimedStockingStack(slot.getItem(), mc.player.getName().getString()))
+            {
+                continue;
+            }
+            try
+            {
+                mc.gameMode.handleContainerInput(mc.player.containerMenu.containerId, slot.index, 0, ContainerInput.QUICK_MOVE, mc.player);
+                moved++;
+            }
+            catch (final Exception e)
+            {
+                recordScanFailure(pendingAdvancedOpenContainerId, pendingAdvancedOpenDimension, pendingAdvancedOpenPos, e.getLocalizedMessage(), nowMs);
+                break;
+            }
+        }
+    }
+
+    private boolean isClaimedStockingStack(final ItemStack stack, final String playerName)
+    {
+        if (stack == null || stack.isEmpty())
+        {
+            return false;
+        }
+        final String key = materialKey(stack);
+        final String stackItemId = itemId(stack);
+        synchronized (this)
+        {
+            for (final ThirdPartyProjectRecord record : projects.values())
+            {
+                if (!isParticipating(record))
+                {
+                    continue;
+                }
+                for (final ProjectMaterial material : record.getMaterials())
+                {
+                    if (!material.materialKey.equals(key) && !material.itemId.equals(stackItemId))
+                    {
+                        continue;
+                    }
+                    if (isClaimedBy(record, material.materialKey, playerName))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private void clearPendingAdvancedOpen()
+    {
+        pendingAdvancedOpenContainerId = "";
+        pendingAdvancedOpenDimension = "";
+        pendingAdvancedOpenPos = null;
+        pendingAdvancedOpenStartedMs = 0L;
+    }
+
+    private int advancedScanRadius(final Player player)
+    {
+        if (isAdvancedV3())
+        {
+            if (advancedAutoTakeArmed)
+            {
+                final Minecraft mc = Minecraft.getInstance();
+                final int renderDistance = mc != null && mc.options != null ? mc.options.renderDistance().get() : 8;
+                return Math.max(1, Math.min(renderDistance * 16, 96));
+            }
+            return Math.max(1, (int) Math.ceil(player.blockInteractionRange()));
+        }
+        return Math.max(1, (int) Math.ceil(player.blockInteractionRange()));
     }
 
     private void recomputeLocalCollected(final long nowMs)
@@ -1485,6 +1927,35 @@ public class ThirdPartySyncService extends AbstractService
             addStackCounts(counts, container.getItem(i), 0);
         }
         return counts;
+    }
+
+    private List<ItemStack> collectContainerStacks(final Container container)
+    {
+        final List<ItemStack> stacks = new ArrayList<>();
+        if (container == null)
+        {
+            return stacks;
+        }
+        for (int i = 0; i < container.getContainerSize(); i++)
+        {
+            final ItemStack stack = container.getItem(i);
+            stacks.add(stack == null || stack.isEmpty() ? ItemStack.EMPTY : stack.copy());
+        }
+        return stacks;
+    }
+
+    private static List<ItemStack> copyStacks(final List<ItemStack> stacks)
+    {
+        final List<ItemStack> copy = new ArrayList<>();
+        if (stacks == null)
+        {
+            return copy;
+        }
+        for (final ItemStack stack : stacks)
+        {
+            copy.add(stack == null || stack.isEmpty() ? ItemStack.EMPTY : stack.copy());
+        }
+        return copy;
     }
 
     private void addStackCounts(final Map<String, Integer> counts, final ItemStack stack, final int depth)
@@ -1685,35 +2156,409 @@ public class ThirdPartySyncService extends AbstractService
 
     private void renderAdvancedHud(final GuiGraphicsExtractor gui, final Minecraft mc)
     {
-        if (!advancedStockingEnabled || advancedHits.isEmpty())
+        if (!advancedStockingEnabled)
         {
             return;
         }
 
         final int centerX = gui.guiWidth() / 2;
         final int centerY = gui.guiHeight() / 2;
+        final String dimension = mc.level == null ? "" : mc.level.dimension().identifier().toString();
+        final boolean previewPressed = showContainerPreview && isPreviewKeyPressed(mc);
+        final String targetedContainerId = previewPressed ? targetedContainerId(mc) : "";
+        refreshAdvancedHitsFromSnapshots(dimension, System.currentTimeMillis());
         int index = 0;
         for (final AdvancedContainerHit hit : new ArrayList<>(advancedHits.values()))
         {
+            if (!dimension.equals(hit.dimension))
+            {
+                continue;
+            }
             if (index >= Math.min(3, maxContainersPerCycle))
             {
                 break;
             }
 
-            final int labelX = centerX + 36;
-            final int labelY = centerY + 22 + index * 22;
+            final ScreenPoint point = screenPointForContainer(mc, hit.position, centerX, centerY);
+            if (point == null)
+            {
+                continue;
+            }
+            final int maxLabelX = Math.max(4, gui.guiWidth() - 174);
+            final int labelX = Math.max(4, Math.min(maxLabelX, point.x + 8));
+            final int labelY = Math.max(18, Math.min(gui.guiHeight() - 34, point.y - 6 + index * 2));
             if (rayLineEnabled)
             {
-                drawLine(gui, centerX, centerY, labelX - 4, labelY + 4, 0xAA66CCFF);
+                drawLine(gui, centerX, centerY, point.x, point.y, 0xAA66CCFF);
             }
-            if (showContainerPreview)
-            {
-                final String line = "@" + hit.position.getX() + " " + hit.position.getY() + " " + hit.position.getZ() + " " + trimHudLine(hit.preview(), 26);
-                gui.fill(labelX - 3, labelY - 3, labelX + Math.min(170, mc.font.width(line) + 6), labelY + 10, 0x77000000);
-                gui.text(mc.font, line, labelX, labelY, 0xFF66CCFF);
-            }
+            renderAdvancedHitLabel(gui, mc, hit, labelX, labelY);
             index++;
         }
+
+        if (previewPressed)
+        {
+            renderContainerSnapshotPreview(gui, mc, targetedContainerId, centerX, centerY + 48);
+        }
+
+        if ((isAdvancedV2() || isAdvancedV3()) && !advancedAutoTakeArmed)
+        {
+            final String line = isAdvancedV3()
+                    ? "V3 视距取货已锁定：先开启允许高级自动取货"
+                    : "V2 安全取货已锁定：先开启允许高级自动取货";
+            final int width = mc.font.width(line);
+            final int x = centerX - width / 2;
+            gui.fill(x - 4, centerY + 66, x + width + 4, centerY + 79, 0x99000000);
+            gui.text(mc.font, line, x, centerY + 68, 0xFFFF5555);
+        }
+    }
+
+    private void renderAdvancedHitLabel(final GuiGraphicsExtractor gui, final Minecraft mc, final AdvancedContainerHit hit, final int x, final int y)
+    {
+        final List<ContainerPreviewEntry> entries = previewEntries(hit.matchingMaterials, 3);
+        final String title = "@" + hit.position.getX() + " " + hit.position.getY() + " " + hit.position.getZ();
+        int width = mc.font.width(title) + 10;
+        for (final ContainerPreviewEntry entry : entries)
+        {
+            width += 20 + mc.font.width(entry.displayName) + 6;
+        }
+        width = Math.min(220, Math.max(96, width));
+        gui.fill(x - 3, y - 3, x + width, y + 18, 0x99000000);
+        gui.text(mc.font, title, x, y + 4, 0xFF66CCFF);
+        int iconX = x + mc.font.width(title) + 8;
+        for (final ContainerPreviewEntry entry : entries)
+        {
+            gui.item(entry.stack, iconX, y);
+            gui.itemDecorations(mc.font, entry.stack, iconX, y, Integer.toString(entry.amount));
+            iconX += 18;
+            final String name = trimHudLine(entry.displayName, 8);
+            gui.text(mc.font, name, iconX, y + 4, 0xFFFFFFFF);
+            iconX += mc.font.width(name) + 6;
+            if (iconX > x + width - 20)
+            {
+                break;
+            }
+        }
+    }
+
+    private void renderContainerSnapshotPreview(final GuiGraphicsExtractor gui, final Minecraft mc, final String containerId, final int centerX, final int y)
+    {
+        final Map<String, Integer> snapshot = containerId == null || containerId.isBlank() ? null : advancedContainerSnapshots.get(containerId);
+        final List<ItemStack> slotSnapshot = containerId == null || containerId.isBlank() ? Collections.emptyList() : advancedContainerSlotSnapshots.getOrDefault(containerId, Collections.emptyList());
+        final List<ContainerPreviewEntry> entries = previewEntries(snapshot, 54);
+        final int columns = 9;
+        final int slotSize = 18;
+        final int slotCount = !slotSnapshot.isEmpty() ? Math.min(54, slotSnapshot.size()) : Math.min(54, entries.size());
+        final int rows = Math.max(1, (int) Math.ceil(Math.max(1, slotCount) / (double) columns));
+        final int panelWidth = columns * slotSize + 12;
+        final int panelHeight = rows * slotSize + 24;
+        final int x = centerX - panelWidth / 2;
+        gui.fill(x, y, x + panelWidth, y + panelHeight, 0xCC101010);
+        gui.outline(x, y, panelWidth, panelHeight, 0xFF66CCFF);
+        gui.text(mc.font, "容器快照", x + 6, y + 6, 0xFFFFFFFF);
+        if (entries.isEmpty() && slotSnapshot.isEmpty())
+        {
+            gui.text(mc.font, "暂无该容器快照缓存", x + 58, y + 28, 0xFFFFD54F);
+            return;
+        }
+        if (!slotSnapshot.isEmpty())
+        {
+            for (int i = 0; i < slotCount; i++)
+            {
+                final ItemStack stack = slotSnapshot.get(i);
+                final int slotX = x + 6 + i % columns * slotSize;
+                final int slotY = y + 20 + i / columns * slotSize;
+                gui.fill(slotX, slotY, slotX + 17, slotY + 17, 0xFF303030);
+                gui.outline(slotX, slotY, 17, 17, 0xFF5A5A5A);
+                if (stack != null && !stack.isEmpty())
+                {
+                    gui.item(stack, slotX + 1, slotY + 1);
+                    gui.itemDecorations(mc.font, stack, slotX + 1, slotY + 1);
+                }
+            }
+            return;
+        }
+        for (int i = 0; i < entries.size(); i++)
+        {
+            final ContainerPreviewEntry entry = entries.get(i);
+            final int slotX = x + 6 + i % columns * slotSize;
+            final int slotY = y + 20 + i / columns * slotSize;
+            gui.fill(slotX, slotY, slotX + 17, slotY + 17, 0xFF303030);
+            gui.outline(slotX, slotY, 17, 17, 0xFF5A5A5A);
+            gui.item(entry.stack, slotX + 1, slotY + 1);
+            gui.itemDecorations(mc.font, entry.stack, slotX + 1, slotY + 1, Integer.toString(entry.amount));
+        }
+    }
+
+    private void refreshAdvancedHitsFromSnapshots(final String dimension, final long nowMs)
+    {
+        if (dimension == null || dimension.isBlank())
+        {
+            return;
+        }
+
+        final Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.player == null)
+        {
+            return;
+        }
+
+        advancedHits.entrySet().removeIf(entry -> nowMs - entry.getValue().scannedAt > Math.max(staleAfterMs, 30000));
+        final String playerName = mc.player.getName().getString();
+        for (final Map.Entry<String, Map<String, Integer>> entry : advancedContainerSnapshots.entrySet())
+        {
+            final ScannedPosition scanned = ScannedPosition.fromContainerId(entry.getKey());
+            if (scanned == null || !dimension.equals(scanned.dimension) || isContainerInCooldown(entry.getKey(), nowMs))
+            {
+                continue;
+            }
+            final Map<String, Integer> matches = findAdvancedMatches(entry.getValue(), playerName);
+            if (matches.isEmpty())
+            {
+                advancedHits.remove(entry.getKey());
+            }
+            else
+            {
+                advancedHits.put(entry.getKey(), new AdvancedContainerHit(entry.getKey(), scanned.dimension, scanned.position, matches, nowMs));
+            }
+        }
+    }
+
+    private ScreenPoint screenPointForContainer(final Minecraft mc, final BlockPos pos, final int centerX, final int centerY)
+    {
+        if (mc == null || mc.player == null || pos == null)
+        {
+            return null;
+        }
+        return screenPointForWorldPos(mc, Vec3.atCenterOf(pos), centerX, centerY, advancedDisplayDistance(mc.player));
+    }
+
+    private ScreenPoint screenPointForWorldPos(final Minecraft mc, final Vec3 target, final int centerX, final int centerY, final double maxDistance)
+    {
+        if (mc == null || mc.player == null || target == null)
+        {
+            return null;
+        }
+        final Vec3 eye = mc.player.getEyePosition();
+        final Vec3 toTarget = target.subtract(eye);
+        final double distance = toTarget.length();
+        if (distance > maxDistance)
+        {
+            return null;
+        }
+
+        final Vec3 forward = mc.player.getViewVector(1.0F).normalize();
+        final double depth = toTarget.dot(forward);
+        if (depth <= 0.15D)
+        {
+            return null;
+        }
+
+        Vec3 right = new Vec3(forward.z, 0.0D, -forward.x);
+        if (right.lengthSqr() < 0.0001D)
+        {
+            right = Vec3.X_AXIS;
+        }
+        right = right.normalize();
+        final Vec3 up = forward.cross(right).normalize();
+        final double horizontal = toTarget.dot(right) / depth;
+        final double vertical = toTarget.dot(up) / depth;
+        final int maxX = Math.max(20, centerX - 12);
+        final int maxY = Math.max(20, centerY - 12);
+        final int x = centerX + (int) Math.round(Math.max(-1.0D, Math.min(1.0D, horizontal)) * maxX);
+        final int y = centerY - (int) Math.round(Math.max(-1.0D, Math.min(1.0D, vertical)) * maxY);
+        return new ScreenPoint(x, y);
+    }
+
+    private double advancedDisplayDistance(final Player player)
+    {
+        if (player == null)
+        {
+            return 0.0D;
+        }
+        if (isAdvancedV3() && advancedAutoTakeArmed)
+        {
+            return advancedScanRadius(player) + 1.0D;
+        }
+        return Math.max(player.blockInteractionRange(), lineMaxDistanceTenths / 10.0D);
+    }
+
+    private void renderStorageZonePreview(final GuiGraphicsExtractor gui, final Minecraft mc)
+    {
+        if (storageZonePreviewFirstCorner == null || storageZonePreviewDimension == null || storageZonePreviewDimension.isBlank()
+                || mc == null || mc.level == null || mc.player == null
+                || !storageZonePreviewDimension.equals(mc.level.dimension().identifier().toString()))
+        {
+            return;
+        }
+
+        final int centerX = gui.guiWidth() / 2;
+        final int centerY = gui.guiHeight() / 2;
+        if (storageZonePreviewSecondCorner == null)
+        {
+            final ScreenPoint point = screenPointForWorldPos(mc, Vec3.atCenterOf(storageZonePreviewFirstCorner), centerX, centerY, 96.0D);
+            if (point != null)
+            {
+                drawLine(gui, point.x - 5, point.y, point.x + 5, point.y, 0xCC55FF55);
+                drawLine(gui, point.x, point.y - 5, point.x, point.y + 5, 0xCC55FF55);
+                final String label = "备货区 A " + storageZonePreviewFirstCorner.getX() + " "
+                        + storageZonePreviewFirstCorner.getY() + " " + storageZonePreviewFirstCorner.getZ();
+                gui.fill(point.x + 7, point.y - 7, point.x + 11 + mc.font.width(label), point.y + 5, 0x99000000);
+                gui.text(mc.font, label, point.x + 9, point.y - 5, 0xFF55FF55);
+            }
+            return;
+        }
+
+        final int minX = Math.min(storageZonePreviewFirstCorner.getX(), storageZonePreviewSecondCorner.getX());
+        final int minY = Math.min(storageZonePreviewFirstCorner.getY(), storageZonePreviewSecondCorner.getY());
+        final int minZ = Math.min(storageZonePreviewFirstCorner.getZ(), storageZonePreviewSecondCorner.getZ());
+        final int maxX = Math.max(storageZonePreviewFirstCorner.getX(), storageZonePreviewSecondCorner.getX()) + 1;
+        final int maxY = Math.max(storageZonePreviewFirstCorner.getY(), storageZonePreviewSecondCorner.getY()) + 1;
+        final int maxZ = Math.max(storageZonePreviewFirstCorner.getZ(), storageZonePreviewSecondCorner.getZ()) + 1;
+        final Vec3[] corners = {
+                new Vec3(minX, minY, minZ), new Vec3(maxX, minY, minZ),
+                new Vec3(maxX, minY, maxZ), new Vec3(minX, minY, maxZ),
+                new Vec3(minX, maxY, minZ), new Vec3(maxX, maxY, minZ),
+                new Vec3(maxX, maxY, maxZ), new Vec3(minX, maxY, maxZ)
+        };
+        final ScreenPoint[] points = new ScreenPoint[corners.length];
+        for (int i = 0; i < corners.length; i++)
+        {
+            points[i] = screenPointForWorldPos(mc, corners[i], centerX, centerY, 128.0D);
+        }
+        final int[][] edges = {
+                {0, 1}, {1, 2}, {2, 3}, {3, 0},
+                {4, 5}, {5, 6}, {6, 7}, {7, 4},
+                {0, 4}, {1, 5}, {2, 6}, {3, 7}
+        };
+        for (final int[] edge : edges)
+        {
+            final ScreenPoint a = points[edge[0]];
+            final ScreenPoint b = points[edge[1]];
+            if (a != null && b != null)
+            {
+                drawLine(gui, a.x, a.y, b.x, b.y, 0xCC55FF55);
+            }
+        }
+        final ScreenPoint labelPoint = screenPointForWorldPos(mc, Vec3.atCenterOf(storageZonePreviewFirstCorner), centerX, centerY, 128.0D);
+        if (labelPoint != null)
+        {
+            final String label = "备货区预览 " + (maxX - minX) + "x" + (maxY - minY) + "x" + (maxZ - minZ);
+            gui.fill(labelPoint.x + 7, labelPoint.y - 7, labelPoint.x + 11 + mc.font.width(label), labelPoint.y + 5, 0x99000000);
+            gui.text(mc.font, label, labelPoint.x + 9, labelPoint.y - 5, 0xFF55FF55);
+        }
+    }
+
+    private boolean isPreviewKeyPressed(final Minecraft mc)
+    {
+        if (mc == null || mc.getWindow() == null || containerPreviewKeyCode <= 0)
+        {
+            return false;
+        }
+        return GLFW.glfwGetKey(mc.getWindow().handle(), containerPreviewKeyCode) == GLFW.GLFW_PRESS;
+    }
+
+    private String targetedContainerId(final Minecraft mc)
+    {
+        if (mc == null || mc.level == null || !(mc.hitResult instanceof BlockHitResult hit))
+        {
+            return "";
+        }
+        final BlockPos pos = hit.getBlockPos();
+        final BlockEntity blockEntity = mc.level.getBlockEntity(pos);
+        if (!(blockEntity instanceof Container))
+        {
+            return "";
+        }
+        return containerId(mc.level.dimension().identifier().toString(), pos);
+    }
+
+    private List<ContainerPreviewEntry> previewEntries(final Map<String, Integer> counts, final int limit)
+    {
+        if (counts == null || counts.isEmpty())
+        {
+            return Collections.emptyList();
+        }
+        final Map<String, ContainerPreviewEntry> merged = new LinkedHashMap<>();
+        counts.forEach((key, amount) -> {
+            if (amount != null && amount > 0 && !isDuplicateItemIdCount(counts, key))
+            {
+                final String displayName = materialDisplayNameForKey(key);
+                final ItemStack stack = stackForMaterialKey(key);
+                merged.compute(displayName, (ignored, current) -> {
+                    if (current == null)
+                    {
+                        return new ContainerPreviewEntry(stack, displayName, amount);
+                    }
+                    current.amount += amount;
+                    if (current.stack.isEmpty() && !stack.isEmpty())
+                    {
+                        current.stack = stack;
+                    }
+                    return current;
+                });
+            }
+        });
+        return merged.values().stream()
+                .limit(limit)
+                .toList();
+    }
+
+    private String materialDisplayNameForKey(final String key)
+    {
+        if (key == null || key.isBlank())
+        {
+            return "";
+        }
+
+        final String itemId = itemIdFromMaterialKey(key);
+        final ItemStack stack = stackForItemId(itemId);
+        if (!stack.isEmpty())
+        {
+            return stack.getHoverName().getString();
+        }
+
+        synchronized (this)
+        {
+            for (final ThirdPartyProjectRecord record : projects.values())
+            {
+                for (final ProjectMaterial material : record.getMaterials())
+                {
+                    if (key.equals(material.materialKey) || key.equals(material.itemId) || itemId.equals(material.itemId))
+                    {
+                        if (material.displayName != null && !material.displayName.isBlank())
+                        {
+                            return material.displayName;
+                        }
+                    }
+                }
+            }
+        }
+
+        return key;
+    }
+
+    private ItemStack stackForMaterialKey(final String key)
+    {
+        return stackForItemId(itemIdFromMaterialKey(key));
+    }
+
+    private static boolean isDuplicateItemIdCount(final Map<String, Integer> counts, final String key)
+    {
+        if (key == null || key.indexOf('#') >= 0)
+        {
+            return false;
+        }
+        return counts.keySet().stream().anyMatch(other -> other.startsWith(key + "#"));
+    }
+
+    private static String itemIdFromMaterialKey(final String key)
+    {
+        if (key == null)
+        {
+            return "";
+        }
+        final int hashIndex = key.indexOf('#');
+        return hashIndex > 0 ? key.substring(0, hashIndex) : key;
     }
 
     private static void drawLine(final GuiGraphicsExtractor gui, final int x0, final int y0, final int x1, final int y1, final int color)
@@ -1769,7 +2614,17 @@ public class ThirdPartySyncService extends AbstractService
         {
             return 0xFF000000 | claim.colorTag.hashCode() & 0x00FFFFFF;
         }
-        return 0xFF000000 | claim.materialKey.hashCode() & 0x00FFFFFF;
+        return defaultClaimHighlightColor();
+    }
+
+    private int defaultClaimHighlightColor()
+    {
+        return 0xFF000000 | clampRgb(claimHighlightDefaultColorRgb);
+    }
+
+    private static int clampRgb(final int value)
+    {
+        return Math.max(0, Math.min(0xFFFFFF, value));
     }
 
     private void flushPendingOperations()
@@ -1862,18 +2717,20 @@ public class ThirdPartySyncService extends AbstractService
     {
         final ServerPlacement placement = record.getPlacement();
         final BlockPos pos = placement.getPosition();
+        final String projectName = cleanProjectName(record.getProject().name, placement);
+        record.setProjectName(projectName);
 
         final JsonObject placementJson = new JsonObject();
         placementJson.addProperty("placementId", placement.getId().toString());
         placementJson.addProperty("schematicHash", placement.getHash().toString());
-        placementJson.addProperty("name", placement.getName());
+        placementJson.addProperty("name", projectName);
         placementJson.addProperty("dimension", placement.getDimension());
         placementJson.addProperty("originX", pos.getX());
         placementJson.addProperty("originY", pos.getY());
         placementJson.addProperty("originZ", pos.getZ());
         placementJson.addProperty("rotation", placement.getRotation().name());
         placementJson.addProperty("mirror", placement.getMirror().name());
-        placementJson.addProperty("owner", placement.getOwner().getName());
+        placementJson.addProperty("owner", placement.getOwner() != null ? placement.getOwner().getName() : "");
 
         final JsonObject body = new JsonObject();
         body.addProperty("identityMode", projectIdentityMode);
@@ -2033,6 +2890,10 @@ public class ThirdPartySyncService extends AbstractService
             final ServerPlacement placement = ServerPlacement.fromJson(placementJson, context);
             if (placement != null)
             {
+                if (!isBlankOrUnnamed(record.getProject().name))
+                {
+                    placement.setDisplayName(record.getProject().name);
+                }
                 record.setPlacement(placement);
                 isSyncCacheReady(placement);
                 context.getSyncmaticManager().addPlacement(placement);
@@ -2382,12 +3243,16 @@ public class ThirdPartySyncService extends AbstractService
 
     private static final class AdvancedContainerHit
     {
+        private final String containerId;
+        private final String dimension;
         private final BlockPos position;
         private final Map<String, Integer> matchingMaterials;
         private final long scannedAt;
 
-        private AdvancedContainerHit(final BlockPos position, final Map<String, Integer> matchingMaterials, final long scannedAt)
+        private AdvancedContainerHit(final String containerId, final String dimension, final BlockPos position, final Map<String, Integer> matchingMaterials, final long scannedAt)
         {
+            this.containerId = containerId;
+            this.dimension = dimension;
             this.position = position;
             this.matchingMaterials = matchingMaterials;
             this.scannedAt = scannedAt;
@@ -2401,6 +3266,32 @@ public class ThirdPartySyncService extends AbstractService
             }
             final Map.Entry<String, Integer> first = matchingMaterials.entrySet().iterator().next();
             return first.getKey() + " x" + first.getValue();
+        }
+    }
+
+    private static final class ContainerPreviewEntry
+    {
+        private ItemStack stack;
+        private final String displayName;
+        private int amount;
+
+        private ContainerPreviewEntry(final ItemStack stack, final String displayName, final int amount)
+        {
+            this.stack = stack == null ? ItemStack.EMPTY : stack.copyWithCount(Math.max(1, Math.min(64, amount)));
+            this.displayName = displayName == null ? "" : displayName;
+            this.amount = amount;
+        }
+    }
+
+    private static final class ScreenPoint
+    {
+        private final int x;
+        private final int y;
+
+        private ScreenPoint(final int x, final int y)
+        {
+            this.x = x;
+            this.y = y;
         }
     }
 
@@ -2476,6 +3367,71 @@ public class ThirdPartySyncService extends AbstractService
     private static String now()
     {
         return Instant.now().toString();
+    }
+
+    private static String normalizeAdvancedMode(final String value)
+    {
+        if ("v2_safe_take".equalsIgnoreCase(value))
+        {
+            return "v2_safe_take";
+        }
+        if ("v3_unrestricted_take".equalsIgnoreCase(value))
+        {
+            return "v3_unrestricted_take";
+        }
+        return "v1_scan";
+    }
+
+    private boolean isAdvancedV2()
+    {
+        return "v2_safe_take".equalsIgnoreCase(advancedStockingMode);
+    }
+
+    private boolean isAdvancedV3()
+    {
+        return "v3_unrestricted_take".equalsIgnoreCase(advancedStockingMode);
+    }
+
+    private static String cleanProjectName(final String requested, final ServerPlacement placement)
+    {
+        final String trimmed = requested == null ? "" : requested.trim();
+        if (!isBlankOrUnnamed(trimmed))
+        {
+            return trimmed;
+        }
+        return defaultProjectName(placement);
+    }
+
+    private static String defaultProjectName(final ServerPlacement placement)
+    {
+        if (placement == null)
+        {
+            return "";
+        }
+        final String display = placement.getName();
+        if (!isBlankOrUnnamed(display))
+        {
+            return display;
+        }
+        String fileName = placement.getCleanFileName();
+        if (fileName.endsWith(".litematic"))
+        {
+            fileName = fileName.substring(0, fileName.length() - ".litematic".length());
+        }
+        return isBlankOrUnnamed(fileName) ? placement.getId().toString() : fileName;
+    }
+
+    private static boolean isBlankOrUnnamed(final String value)
+    {
+        if (value == null)
+        {
+            return true;
+        }
+        final String trimmed = value.trim();
+        return trimmed.isBlank()
+                || "?".equals(trimmed)
+                || "unnamed".equalsIgnoreCase(trimmed)
+                || "未命名".equals(trimmed);
     }
 
     private void showMessage(final Message.MessageType type, final String key, final Object... args)

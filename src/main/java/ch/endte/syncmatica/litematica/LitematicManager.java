@@ -1,5 +1,6 @@
 package ch.endte.syncmatica.litematica;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -398,6 +399,15 @@ public class LitematicManager
         }
     }
 
+    public void updateRenderedName(final ServerPlacement placement)
+    {
+        final SchematicPlacement renderedPlacement = getRenderedPlacement(placement);
+        if (renderedPlacement != null)
+        {
+            renderedPlacement.setName(placement.getName());
+        }
+    }
+
     public void updateServerPlacement(final SchematicPlacement placement, final ServerPlacement serverPlacement)
     {
         serverPlacement.move(
@@ -427,7 +437,63 @@ public class LitematicManager
                 return rendered;
             }
         }
+        return findLoadedPlacement(placement);
+    }
+
+    private @Nullable ServerPlacement findLoadedPlacement(final ServerPlacement placement)
+    {
+        if (context == null || placement == null)
+        {
+            return null;
+        }
+
+        final Path expectedFile = context.getFileStorage().getLocalLitematic(placement);
+        for (final SchematicPlacement schematicPlacement : DataManager.getSchematicPlacementManager().getAllSchematicsPlacements())
+        {
+            final UUID serverId = eventHandler.getServerId(schematicPlacement);
+            final boolean idMatches = serverId != null && serverId.equals(placement.getId());
+            final boolean fileAndPlacementMatch = idMatches || matchesLoadedPlacement(placement, expectedFile, schematicPlacement);
+            if (!fileAndPlacementMatch)
+            {
+                continue;
+            }
+
+            final ServerPlacement adjusted = readVersionInfo(placement, schematicPlacement);
+            final ServerPlacement key = Objects.requireNonNullElse(adjusted, placement);
+            eventHandler.setServerId(schematicPlacement, placement.getId());
+            rendering.put(key, schematicPlacement);
+            if (schematicPlacement.getSchematicFile() != null)
+            {
+                ((RedirectFileStorage) context.getFileStorage()).addRedirect(schematicPlacement.getSchematicFile());
+            }
+            return key;
+        }
+
         return null;
+    }
+
+    private boolean matchesLoadedPlacement(final ServerPlacement placement, final Path expectedFile, final SchematicPlacement schematicPlacement)
+    {
+        if (schematicPlacement == null || expectedFile == null || schematicPlacement.getSchematicFile() == null)
+        {
+            return false;
+        }
+        return samePath(expectedFile, schematicPlacement.getSchematicFile())
+                && placement.getPosition().equals(schematicPlacement.getOrigin())
+                && placement.getRotation() == schematicPlacement.getRotation()
+                && placement.getMirror() == schematicPlacement.getMirror();
+    }
+
+    private boolean samePath(final Path expected, final Path actual)
+    {
+        try
+        {
+            return Files.isSameFile(expected, actual);
+        }
+        catch (final Exception ignored)
+        {
+            return expected.toAbsolutePath().normalize().equals(actual.toAbsolutePath().normalize());
+        }
     }
 
     private @Nullable SchematicPlacement getRenderedPlacement(final ServerPlacement placement)

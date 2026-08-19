@@ -32,6 +32,8 @@ import java.util.stream.Collectors;
 
 public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjectRecord, WidgetThirdPartyProjectEntry>
 {
+    private static final int GROUP_HEADER_HEIGHT = 16;
+
     private final int infoWidth = 230;
     private final int infoHeight = 320;
     private final GuiThirdPartyProjectList parent;
@@ -157,7 +159,14 @@ public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjec
     @Override
     protected WidgetThirdPartyProjectEntry createListEntryWidget(final int x, final int y, final int listIndex, final boolean isOdd, final ThirdPartyProjectRecord entry)
     {
-        return new WidgetThirdPartyProjectEntry(x, y, browserEntryWidth, getBrowserEntryHeightFor(entry), entry, listIndex, parent);
+        return new WidgetThirdPartyProjectEntry(x, y, browserEntryWidth, getBrowserEntryHeightFor(entry), entry, listIndex, parent,
+                startsGroup(entry), projectStage(entry), GROUP_HEADER_HEIGHT);
+    }
+
+    @Override
+    protected int getBrowserEntryHeightFor(final ThirdPartyProjectRecord entry)
+    {
+        return browserEntryHeight + (startsGroup(entry) ? GROUP_HEADER_HEIGHT : 0);
     }
 
     @Override
@@ -173,8 +182,19 @@ public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjec
         return thirdParty.getProjects().stream()
                 .filter(record -> currentPlacementId == null || currentPlacementId.toString().equals(record.getPlacementId()))
                 .filter(record -> !onlyMyClaims || hasClaimBy(record, player))
-                .sorted(Comparator.comparing(WidgetListThirdPartyProject::projectName, String.CASE_INSENSITIVE_ORDER))
+                .sorted(Comparator.comparingInt(WidgetListThirdPartyProject::projectStageRank)
+                        .thenComparing(WidgetListThirdPartyProject::projectName, String.CASE_INSENSITIVE_ORDER))
                 .collect(Collectors.toList());
+    }
+
+    private boolean startsGroup(final ThirdPartyProjectRecord entry)
+    {
+        final int index = listContents.indexOf(entry);
+        if (index <= 0)
+        {
+            return true;
+        }
+        return projectStageRank(entry) != projectStageRank(listContents.get(index - 1));
     }
 
     static String projectName(final ThirdPartyProjectRecord record)
@@ -192,13 +212,7 @@ public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjec
 
     static String projectStage(final ThirdPartyProjectRecord record)
     {
-        if (record == null)
-        {
-            return StringUtils.translate("syncmatica.gui.label.project_status.collecting");
-        }
-        final String status = record.getProject().status == null || record.getProject().status.isBlank()
-                ? record.getStatus()
-                : record.getProject().status;
+        final String status = projectStageKey(record);
         if ("completed".equalsIgnoreCase(status))
         {
             return StringUtils.translate("syncmatica.gui.label.project_status.completed");
@@ -211,9 +225,19 @@ public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjec
         {
             return StringUtils.translate("syncmatica.gui.label.project_status.collecting");
         }
-        if (record.getMaterials().isEmpty())
+        return StringUtils.translate("syncmatica.gui.label.project_status.collecting");
+    }
+
+    private static String projectStageKey(final ThirdPartyProjectRecord record)
+    {
+        final String status = projectStatusValue(record);
+        if ("collecting".equalsIgnoreCase(status) || "building".equalsIgnoreCase(status) || "completed".equalsIgnoreCase(status))
         {
-            return StringUtils.translate("syncmatica.gui.label.project_status.collecting");
+            return status.toLowerCase();
+        }
+        if (record == null || record.getMaterials().isEmpty())
+        {
+            return "collecting";
         }
 
         boolean allCollected = true;
@@ -234,13 +258,42 @@ public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjec
 
         if (allCollected)
         {
-            return StringUtils.translate("syncmatica.gui.label.project_status.completed");
+            return "completed";
         }
         if (allCovered)
         {
-            return StringUtils.translate("syncmatica.gui.label.project_status.building");
+            return "building";
         }
-        return StringUtils.translate("syncmatica.gui.label.project_status.collecting");
+        return "collecting";
+    }
+
+    static int projectStageRank(final ThirdPartyProjectRecord record)
+    {
+        final String status = projectStageKey(record);
+        if ("collecting".equalsIgnoreCase(status))
+        {
+            return 0;
+        }
+        if ("building".equalsIgnoreCase(status))
+        {
+            return 1;
+        }
+        if ("completed".equalsIgnoreCase(status))
+        {
+            return 2;
+        }
+        return 3;
+    }
+
+    private static String projectStatusValue(final ThirdPartyProjectRecord record)
+    {
+        if (record == null)
+        {
+            return "collecting";
+        }
+        return record.getProject().status == null || record.getProject().status.isBlank()
+                ? record.getStatus()
+                : record.getProject().status;
     }
 
     static int reservedAmount(final ThirdPartyProjectRecord record, final String materialKey)
@@ -328,7 +381,7 @@ public class WidgetListThirdPartyProject extends WidgetListBase<ThirdPartyProjec
         return false;
     }
 
-    private static String shortValue(final String value, final int max)
+    static String shortValue(final String value, final int max)
     {
         if (value == null || value.length() <= max)
         {

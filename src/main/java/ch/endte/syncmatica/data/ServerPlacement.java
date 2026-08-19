@@ -99,6 +99,15 @@ public class ServerPlacement
         return this.displayName;
     }
 
+    public ServerPlacement setDisplayName(final String displayName)
+    {
+        if (displayName != null && !displayName.isBlank())
+        {
+            this.displayName = displayName;
+        }
+        return this;
+    }
+
     public String getFileName()
     {
         return this.fileName;
@@ -374,6 +383,15 @@ public class ServerPlacement
             if (obj.has("display_name"))
             {
                 displayName = obj.get("display_name").getAsString();
+                if (displayName == null || displayName.isBlank() || "?".equals(displayName.trim()) || "unnamed".equalsIgnoreCase(displayName.trim()))
+                {
+                    displayName = normalizeFileName(badFileName);
+                    if (displayName.endsWith(".litematic"))
+                    {
+                        displayName = displayName.substring(0, displayName.length() - ".litematic".length());
+                    }
+                    dirty = true;
+                }
             }
             else
             {

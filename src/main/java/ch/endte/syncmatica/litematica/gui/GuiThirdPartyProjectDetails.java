@@ -8,8 +8,10 @@ import ch.endte.syncmatica.thirdparty.ProjectMaterial;
 import ch.endte.syncmatica.thirdparty.StorageZone;
 import ch.endte.syncmatica.thirdparty.ThirdPartyProjectRecord;
 import fi.dy.masa.malilib.gui.GuiBase;
+import fi.dy.masa.malilib.gui.GuiTextFieldGeneric;
 import fi.dy.masa.malilib.gui.Message;
 import fi.dy.masa.malilib.gui.button.ButtonGeneric;
+import fi.dy.masa.malilib.gui.interfaces.ITextFieldListener;
 import fi.dy.masa.malilib.render.GuiContext;
 import fi.dy.masa.malilib.render.RenderUtils;
 import fi.dy.masa.malilib.util.StringUtils;
@@ -18,6 +20,7 @@ import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
@@ -35,6 +38,8 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     private boolean pendingClaimOverride;
     private String pendingClaimMaterialKey = "";
     private int pendingClaimAmount;
+    private GuiTextFieldGeneric projectNameField;
+    private boolean editingCornerA = true;
 
     public GuiThirdPartyProjectDetails(final ThirdPartyProjectRecord record)
     {
@@ -54,8 +59,10 @@ public class GuiThirdPartyProjectDetails extends GuiBase
             return;
         }
         service.recomputeLocalCollectedNow();
+        initializeZoneCorners();
         selectedMaterialIndex = clampSelectedMaterialIndex(selectedMaterialIndex);
         claimDraftAmount = currentClaimAmount(selectedMaterial());
+        addProjectNameEditor(service);
         int x = 10;
         final int y = height - 26;
 
@@ -74,22 +81,33 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         });
         x += buttonWidth + 4;
 
-        label = StringUtils.translate("syncmatica.gui.button.zone_corner_a");
+        label = currentCornerButtonLabel();
         buttonWidth = getStringWidth(label) + 20;
         button = new ButtonGeneric(x, y, buttonWidth, 20, label);
         addButton(button, (b, mouseButton) -> {
-            firstCorner = currentPosition();
-            addMessage(Message.MessageType.SUCCESS, "syncmatica.success.storage_zone_corner_set", "A", posString(firstCorner));
+            editingCornerA = !editingCornerA;
+            initGui();
         });
         x += buttonWidth + 4;
 
-        label = StringUtils.translate("syncmatica.gui.button.zone_corner_b");
+        label = StringUtils.translate("syncmatica.gui.button.zone_target_block");
         buttonWidth = getStringWidth(label) + 20;
         button = new ButtonGeneric(x, y, buttonWidth, 20, label);
         addButton(button, (b, mouseButton) -> {
-            secondCorner = currentPosition();
-            addMessage(Message.MessageType.SUCCESS, "syncmatica.success.storage_zone_corner_set", "B", posString(secondCorner));
+            final BlockPos target = currentTargetBlock();
+            if (target == null)
+            {
+                addMessage(Message.MessageType.WARNING, "syncmatica.error.storage_zone_no_target");
+                return;
+            }
+            setCurrentZoneCorner(target);
         });
+        x += buttonWidth + 4;
+
+        label = StringUtils.translate("syncmatica.gui.button.zone_player_pos");
+        buttonWidth = getStringWidth(label) + 20;
+        button = new ButtonGeneric(x, y, buttonWidth, 20, label);
+        addButton(button, (b, mouseButton) -> setCurrentZoneCorner(currentPosition()));
         x += buttonWidth + 4;
 
         label = StringUtils.translate("syncmatica.gui.button.save_zone");
@@ -108,6 +126,46 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         addMaterialActions();
     }
 
+    private void initializeZoneCorners()
+    {
+        if ((firstCorner != null && secondCorner != null) || record.getZones().isEmpty())
+        {
+            return;
+        }
+        final StorageZone zone = record.getZones().get(record.getZones().size() - 1);
+        firstCorner = new BlockPos(zone.minX, zone.minY, zone.minZ);
+        secondCorner = new BlockPos(zone.maxX, zone.maxY, zone.maxZ);
+    }
+
+    private void addProjectNameEditor(final ThirdPartySyncService service)
+    {
+        final String nameLabel = StringUtils.translate("syncmatica.gui.label.placement_info.display_name") + ":";
+        final String buttonLabel = StringUtils.translate("syncmatica.gui.button.save_project_name");
+        final int fieldY = projectNameEditorY();
+        final int buttonWidth = getStringWidth(buttonLabel) + 16;
+        final int buttonX = Math.max(160, width - 16 - buttonWidth);
+        final int fieldX = Math.max(16, Math.min(buttonX - 96, 16 + getStringWidth(nameLabel) + 8));
+        final int fieldWidth = Math.max(90, buttonX - fieldX - 6);
+        projectNameField = new GuiTextFieldGeneric(fieldX, fieldY, fieldWidth, 16, Minecraft.getInstance().font);
+        projectNameField.setMaxLengthWrapper(80);
+        projectNameField.setTextWrapper(WidgetListThirdPartyProject.projectName(record));
+        addTextField(projectNameField, new ITextFieldListener<>()
+        {
+            @Override
+            public boolean onTextChange(final GuiTextFieldGeneric textField)
+            {
+                return true;
+            }
+        });
+
+        final ButtonGeneric button = new ButtonGeneric(buttonX, fieldY - 2, buttonWidth, 20, buttonLabel);
+        addButton(button, (b, mouseButton) -> {
+            final String nextName = projectNameField.getTextWrapper().trim();
+            service.renameProject(record, nextName);
+            title = StringUtils.translate("syncmatica.gui.title.project_details", nextName.isBlank() ? WidgetListThirdPartyProject.projectName(record) : nextName);
+        });
+    }
+
     private void addMaterialActions()
     {
         // The claim amount is controlled by the slider drawn in drawMaterialActions().
@@ -116,6 +174,12 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     @Override
     protected void drawContents(final GuiContext ctx, final int mouseX, final int mouseY, final float partialTicks)
     {
+        updateZonePreview();
+        final ThirdPartySyncService service = service();
+        if (service != null)
+        {
+            service.renderStorageZonePreview(ctx);
+        }
         drawProjectHeader(ctx);
         drawMaterialRows(ctx);
         drawMaterialActions(ctx);
@@ -171,15 +235,26 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         return super.onMouseReleased(event);
     }
 
+    @Override
+    public void removed()
+    {
+        final ThirdPartySyncService service = service();
+        if (service != null)
+        {
+            service.clearStorageZonePreview(record.getProjectId());
+        }
+        super.removed();
+    }
+
     private void drawProjectHeader(final GuiContext ctx)
     {
         int x = 10;
         int y = 24;
-        RenderUtils.drawOutlinedBox(ctx, x, y, width - 20, 60, 0xA0000000, COLOR_HORIZONTAL_BAR);
+        RenderUtils.drawOutlinedBox(ctx, x, y, width - 20, 76, 0xA0000000, COLOR_HORIZONTAL_BAR);
         x += 6;
         y += 6;
-        drawString(ctx, StringUtils.translate("syncmatica.gui.label.placement_info.display_name") + ": " + WidgetListThirdPartyProject.projectName(record), x, y, 0xFFFFFFFF);
-        y += 12;
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.placement_info.display_name") + ":", x, y, 0xFFFFFFFF);
+        y += 22;
         drawString(ctx, StringUtils.translate("syncmatica.gui.label.placement_info.dimension_id") + ": " + record.getProject().dimension
                 + "    " + StringUtils.translate("syncmatica.gui.label.placement_info.position") + ": "
                 + record.getProject().originX + " " + record.getProject().originY + " " + record.getProject().originZ, x, y, 0xFFC0C0C0);
@@ -337,7 +412,10 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         int y = height - 56;
         final String cornerA = firstCorner == null ? "-" : posString(firstCorner);
         final String cornerB = secondCorner == null ? "-" : posString(secondCorner);
-        drawString(ctx, "A: " + cornerA + "  B: " + cornerB, x, y, 0xFFC0C0C0);
+        final String active = editingCornerA ? "A" : "B";
+        drawString(ctx, StringUtils.translate("syncmatica.gui.label.project_info.zone_editor") + "  "
+                + StringUtils.translate("syncmatica.gui.label.project_info.active_corner") + ": " + active
+                + "  A: " + cornerA + "  B: " + cornerB, x, y, 0xFFC0C0C0);
         y += 12;
         if (!record.getZones().isEmpty())
         {
@@ -346,6 +424,35 @@ public class GuiThirdPartyProjectDetails extends GuiBase
                     + zone.dimension + " " + zone.minX + "," + zone.minY + "," + zone.minZ + " -> "
                     + zone.maxX + "," + zone.maxY + "," + zone.maxZ, x, y, 0xFFC0C0C0);
         }
+    }
+
+    private void updateZonePreview()
+    {
+        final ThirdPartySyncService service = service();
+        if (service != null)
+        {
+            service.setStorageZonePreview(record.getProjectId(), currentDimension(), firstCorner, secondCorner);
+        }
+    }
+
+    private void setCurrentZoneCorner(final BlockPos pos)
+    {
+        if (editingCornerA)
+        {
+            firstCorner = pos;
+            addMessage(Message.MessageType.SUCCESS, "syncmatica.success.storage_zone_corner_set", "A", posString(firstCorner));
+        }
+        else
+        {
+            secondCorner = pos;
+            addMessage(Message.MessageType.SUCCESS, "syncmatica.success.storage_zone_corner_set", "B", posString(secondCorner));
+        }
+        updateZonePreview();
+    }
+
+    private String currentCornerButtonLabel()
+    {
+        return StringUtils.translate("syncmatica.gui.button.zone_active_corner", editingCornerA ? "A" : "B");
     }
 
     private List<ProjectMaterial> sortedMaterials()
@@ -504,7 +611,7 @@ public class GuiThirdPartyProjectDetails extends GuiBase
 
     private int materialListY()
     {
-        return 94;
+        return 110;
     }
 
     private int materialListWidth()
@@ -514,7 +621,12 @@ public class GuiThirdPartyProjectDetails extends GuiBase
 
     private int materialListHeight()
     {
-        return Math.max(176, height - 166);
+        return Math.max(160, height - 182);
+    }
+
+    private int projectNameEditorY()
+    {
+        return 29;
     }
 
     private int visibleMaterialRows()
@@ -543,7 +655,7 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     private ThirdPartySyncService service()
     {
         final Context context = LitematicManager.getInstance().getActiveContext();
-        return context.getThirdPartySyncService();
+        return context == null ? null : context.getThirdPartySyncService();
     }
 
     private static ItemStack itemStackFor(final String itemId)
@@ -561,6 +673,16 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     {
         final Minecraft mc = Minecraft.getInstance();
         return mc != null && mc.player != null ? mc.player.blockPosition() : BlockPos.ZERO;
+    }
+
+    private static BlockPos currentTargetBlock()
+    {
+        final Minecraft mc = Minecraft.getInstance();
+        if (mc == null || !(mc.hitResult instanceof BlockHitResult hit))
+        {
+            return null;
+        }
+        return hit.getBlockPos();
     }
 
     private static String currentDimension()

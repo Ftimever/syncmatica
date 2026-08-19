@@ -76,14 +76,19 @@ public final class SyncmaticaConfigOptions
     public static final ConfigInteger RECOMPUTE_INTERVAL_MS = integer("thirdParty", "recomputeIntervalMs", 5000, 250, 600000);
     public static final ConfigBoolean UPLOAD_ONLY_AGGREGATED_COLLECTED = bool("thirdParty", "uploadOnlyAggregatedCollected", true);
     public static final ConfigBoolean ADVANCED_STOCKING_ENABLED = bool("thirdParty", "advancedStockingEnabled", false);
+    public static final ConfigOptionList ADVANCED_STOCKING_MODE = optionList("thirdParty", "advancedStockingMode", AdvancedStockingMode.V1_SCAN);
     public static final ConfigBoolean ADVANCED_SCAN_CONTAINERS = bool("thirdParty", "advancedScanContainers", true);
     public static final ConfigInteger ADVANCED_SCAN_INTERVAL_MS = integer("thirdParty", "advancedScanIntervalMs", 1000, 100, 60000);
+    public static final ConfigInteger ADVANCED_SAFE_ACTION_INTERVAL_MS = integer("thirdParty", "advancedSafeActionIntervalMs", 1600, 250, 60000);
     public static final ConfigInteger MAX_CONTAINERS_PER_CYCLE = integer("thirdParty", "maxContainersPerCycle", 6, 1, 128);
     public static final ConfigBoolean RAY_LINE_ENABLED = bool("thirdParty", "rayLineEnabled", true);
     public static final ConfigInteger LINE_MAX_DISTANCE_TENTHS = integer("thirdParty", "lineMaxDistanceTenths", 45, 1, 128);
     public static final ConfigBoolean SHOW_CONTAINER_PREVIEW = bool("thirdParty", "showContainerPreview", true);
+    public static final ConfigInteger CONTAINER_PREVIEW_KEY_CODE = integer("thirdParty", "containerPreviewKeyCode", 342, 0, 512);
     public static final ConfigBoolean HIGHLIGHT_CLAIMED_ITEMS = bool("thirdParty", "highlightClaimedItems", true);
     public static final ConfigBoolean USE_CLAIM_COLORS = bool("thirdParty", "useClaimColors", true);
+    public static final ConfigInteger CLAIM_HIGHLIGHT_DEFAULT_COLOR_RGB = integer("thirdParty", "claimHighlightDefaultColorRgb", 0xFFD54F, 0, 0xFFFFFF);
+    public static final ConfigBoolean ADVANCED_AUTO_TAKE_ARMED = bool("thirdParty", "advancedAutoTakeArmed", false);
     public static final ConfigInteger PERMISSION_FAIL_COOLDOWN_MS = integer("thirdParty", "permissionFailCooldownMs", 60000, 1000, 600000);
     public static final ConfigBoolean NON_ZONE_SCANS_AFFECT_PROJECT_COLLECTED = bool("thirdParty", "nonZoneScansAffectProjectCollected", false);
     public static final ConfigBoolean LOG_THIRD_PARTY_REQUESTS = bool("thirdParty", "logThirdPartyRequests", false);
@@ -327,14 +332,19 @@ public final class SyncmaticaConfigOptions
             case "thirdParty.recomputeIntervalMs" -> "本地统计重算间隔 毫秒";
             case "thirdParty.uploadOnlyAggregatedCollected" -> "仅上传项目级汇总";
             case "thirdParty.advancedStockingEnabled" -> "启用高级备货";
+            case "thirdParty.advancedStockingMode" -> "高级备货模式";
             case "thirdParty.advancedScanContainers" -> "高级备货扫描容器";
             case "thirdParty.advancedScanIntervalMs" -> "高级扫描间隔 毫秒";
+            case "thirdParty.advancedSafeActionIntervalMs" -> "高级操作安全间隔 毫秒";
             case "thirdParty.maxContainersPerCycle" -> "每轮最大扫描容器数";
             case "thirdParty.rayLineEnabled" -> "显示容器指引线";
             case "thirdParty.lineMaxDistanceTenths" -> "指引线最大距离 十分之一格";
             case "thirdParty.showContainerPreview" -> "显示容器材料预览";
+            case "thirdParty.containerPreviewKeyCode" -> "容器预览按键代码";
             case "thirdParty.highlightClaimedItems" -> "高亮认领材料槽位";
             case "thirdParty.useClaimColors" -> "使用认领颜色";
+            case "thirdParty.claimHighlightDefaultColorRgb" -> "默认高亮颜色 RGB";
+            case "thirdParty.advancedAutoTakeArmed" -> "允许高级自动取货";
             case "thirdParty.permissionFailCooldownMs" -> "权限失败冷却 毫秒";
             case "thirdParty.nonZoneScansAffectProjectCollected" -> "非备货区扫描影响项目已收集";
             case "thirdParty.logThirdPartyRequests" -> "记录第三方请求日志";
@@ -624,6 +634,46 @@ public final class SyncmaticaConfigOptions
         public IConfigOptionListEntry fromString(final String value)
         {
             return SyncmaticaConfigOptions.fromString(values(), value, MISSING_DESC);
+        }
+    }
+
+    private enum AdvancedStockingMode implements IConfigOptionListEntry
+    {
+        V1_SCAN("v1_scan", "V1 指引扫描"),
+        V2_SAFE_TAKE("v2_safe_take", "V2 安全取货"),
+        V3_UNRESTRICTED_TAKE("v3_unrestricted_take", "V3 视距取货");
+
+        private final String value;
+        private final String displayName;
+
+        AdvancedStockingMode(final String value, final String displayName)
+        {
+            this.value = value;
+            this.displayName = displayName;
+        }
+
+        @Override
+        public String getStringValue()
+        {
+            return value;
+        }
+
+        @Override
+        public String getDisplayName()
+        {
+            return displayName;
+        }
+
+        @Override
+        public IConfigOptionListEntry cycle(final boolean forward)
+        {
+            return SyncmaticaConfigOptions.cycle(values(), this, forward);
+        }
+
+        @Override
+        public IConfigOptionListEntry fromString(final String value)
+        {
+            return SyncmaticaConfigOptions.fromString(values(), value, V1_SCAN);
         }
     }
 

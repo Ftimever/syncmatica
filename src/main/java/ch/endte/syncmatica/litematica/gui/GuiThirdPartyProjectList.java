@@ -20,13 +20,18 @@ public class GuiThirdPartyProjectList extends GuiListBase<ThirdPartyProjectRecor
 
     public GuiThirdPartyProjectList()
     {
-        this(null, false);
+        this((UUID) null, false);
     }
 
     public GuiThirdPartyProjectList(final ServerPlacement placement, final boolean onlyMyClaims)
     {
+        this(placement != null ? placement.getId() : null, onlyMyClaims);
+    }
+
+    private GuiThirdPartyProjectList(final UUID currentPlacementId, final boolean onlyMyClaims)
+    {
         super(12, 30);
-        this.currentPlacementId = placement != null ? placement.getId() : null;
+        this.currentPlacementId = currentPlacementId;
         this.onlyMyClaims = onlyMyClaims;
         title = StringUtils.translate("syncmatica.gui.title.manage_projects", String.format("v%s", Reference.MOD_VERSION));
     }
@@ -57,7 +62,7 @@ public class GuiThirdPartyProjectList extends GuiListBase<ThirdPartyProjectRecor
         buttonWidth = getStringWidth(label) + 20;
         button = new ButtonGeneric(x, y, buttonWidth, 20, label);
         addButton(button, (b, mouseButton) -> {
-            final GuiThirdPartyProjectList gui = new GuiThirdPartyProjectList(null, !onlyMyClaims);
+            final GuiThirdPartyProjectList gui = new GuiThirdPartyProjectList((UUID) null, !onlyMyClaims);
             gui.setParent(getParent());
             GuiBase.openGui(gui);
         });

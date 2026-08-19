@@ -72,6 +72,32 @@ function authName(req, body) {
   return "local-player";
 }
 
+function isBlankOrUnnamed(value) {
+  const text = String(value || "").trim();
+  return !text || text === "?" || text.toLowerCase() === "unnamed" || text === "未命名";
+}
+
+function fileBaseName(value) {
+  const text = String(value || "").replace(/\\/g, "/").split("/").pop() || "";
+  return text.toLowerCase().endsWith(".litematic") ? text.slice(0, -".litematic".length) : text;
+}
+
+function cleanProjectName(placement, serverPlacement, schematicFile, projectId) {
+  const candidates = [
+    placement && placement.name,
+    serverPlacement && serverPlacement.display_name,
+    schematicFile && fileBaseName(schematicFile.fileName),
+    projectId
+  ];
+  return String(candidates.find(value => !isBlankOrUnnamed(value)) || projectId);
+}
+
+function syncServerPlacementName(project) {
+  if (project.serverPlacement && project.project && !isBlankOrUnnamed(project.project.name)) {
+    project.serverPlacement.display_name = project.project.name;
+  }
+}
+
 function identityForImport(body) {
   const placement = body.placement || {};
   const schematicHash = String(placement.schematicHash || "");
@@ -97,12 +123,15 @@ function normalizeMaterial(material) {
 
 function createProject(body, projectId) {
   const placement = body.placement || {};
+  const serverPlacement = body.serverPlacement || null;
+  const schematicFile = body.schematicFile || null;
   const timestamp = now();
+  const projectName = cleanProjectName(placement, serverPlacement, schematicFile, projectId);
   const project = {
     projectId,
     placementId: String(placement.placementId || ""),
     schematicHash: String(placement.schematicHash || ""),
-    name: String(placement.name || projectId),
+    name: projectName,
     dimension: String(placement.dimension || ""),
     originX: Number(placement.originX || 0),
     originY: Number(placement.originY || 0),
@@ -112,7 +141,7 @@ function createProject(body, projectId) {
     updatedAt: timestamp
   };
 
-  return {
+  const result = {
     projectId,
     status: "synced",
     updatedAt: timestamp,
@@ -121,9 +150,11 @@ function createProject(body, projectId) {
     claims: [],
     zones: [],
     collected: {},
-    serverPlacement: body.serverPlacement || null,
-    schematicFile: body.schematicFile || null
+    serverPlacement,
+    schematicFile
   };
+  syncServerPlacementName(result);
+  return result;
 }
 
 function recompute(project) {
@@ -207,6 +238,7 @@ async function handle(req, res) {
       project.schematicFile = next.schematicFile || project.schematicFile;
       project.status = "synced";
       project.updatedAt = now();
+      syncServerPlacementName(project);
     }
 
     json(res, 200, publicProject(project));
@@ -219,6 +251,23 @@ async function handle(req, res) {
   }
 
   const projectMatch = path.match(/^\/api\/v1\/projects\/([^/]+)$/);
+  if (req.method === "POST" && projectMatch) {
+    const project = findProject(projectMatch[1]);
+    if (!project) {
+      json(res, 404, { error: "project not found" });
+      return;
+    }
+    const body = await readBody(req);
+    if (!isBlankOrUnnamed(body.name)) {
+      project.project.name = String(body.name).trim();
+      project.updatedAt = now();
+      project.project.updatedAt = project.updatedAt;
+      syncServerPlacementName(project);
+    }
+    json(res, 200, publicProject(project));
+    return;
+  }
+
   if (req.method === "GET" && projectMatch) {
     const project = findProject(projectMatch[1]);
     if (!project) {
