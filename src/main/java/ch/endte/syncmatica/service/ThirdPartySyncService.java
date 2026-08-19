@@ -40,7 +40,10 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.ItemContainerContents;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.ChestType;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -58,9 +61,11 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -170,6 +175,7 @@ public class ThirdPartySyncService extends AbstractService
     private final Map<String, Map<String, Integer>> scannedZoneContents = new LinkedHashMap<>();
     private final Map<String, Map<String, Integer>> advancedContainerSnapshots = new LinkedHashMap<>();
     private final Map<String, List<ItemStack>> advancedContainerSlotSnapshots = new LinkedHashMap<>();
+    private final Map<String, Long> advancedContainerOpenTimes = new LinkedHashMap<>();
     private final Map<String, AdvancedContainerHit> advancedHits = new LinkedHashMap<>();
     private JsonObject scanCache = new JsonObject();
     private JsonObject claimsCache = new JsonObject();
@@ -184,6 +190,10 @@ public class ThirdPartySyncService extends AbstractService
     private String pendingAdvancedOpenDimension = "";
     private BlockPos pendingAdvancedOpenPos;
     private long pendingAdvancedOpenStartedMs = 0L;
+    private long pendingAdvancedCloseAtMs = 0L;
+    private boolean pendingAdvancedAutoTakeAttempted = false;
+    private String observedOpenContainerId = "";
+    private String observedOpenContentHash = "";
     private String storageZonePreviewProjectId = "";
     private String storageZonePreviewDimension = "";
     private BlockPos storageZonePreviewFirstCorner;
@@ -1155,6 +1165,7 @@ public class ThirdPartySyncService extends AbstractService
 
         final long nowMs = System.currentTimeMillis();
         handleAdvancedOpenResult(nowMs);
+        observeManuallyOpenedContainer(nowMs);
         final boolean shouldScanStorage = storageZonesEnabled && includeStorageZones && nowMs - lastStorageZoneScanMs >= storageZoneScanIntervalMs;
         final boolean shouldScanAdvanced = advancedStockingEnabled && advancedScanContainers && nowMs - lastAdvancedScanMs >= advancedScanIntervalMs;
         if (shouldScanStorage || shouldScanAdvanced)
@@ -1404,12 +1415,18 @@ public class ThirdPartySyncService extends AbstractService
         final String dimension = mc.level.dimension().identifier().toString();
         final int radius = advancedMode ? advancedScanRadius(player) : Math.max(1, (int) Math.ceil(player.blockInteractionRange()));
         final BlockPos playerPos = player.blockPosition();
-        int scanned = 0;
         boolean cacheChanged = false;
 
         if (advancedMode)
         {
             advancedHits.entrySet().removeIf(entry -> nowMs - entry.getValue().scannedAt > Math.max(staleAfterMs, 30000));
+        }
+
+        final Set<String> seenContainers = new HashSet<>();
+        if (advancedMode)
+        {
+            final int reachRadius = Math.max(1, (int) Math.ceil(player.blockInteractionRange()) + 1);
+            cacheChanged |= scanContainerCube(mc, player, dimension, playerPos, reachRadius, 0, Integer.MAX_VALUE, false, advancedMode, true, seenContainers, nowMs).cacheChanged;
         }
 
         final int side = radius * 2 + 1;
@@ -1419,91 +1436,132 @@ public class ThirdPartySyncService extends AbstractService
         final int positionBudget = advancedMode
                 ? Math.min(totalPositions, Math.max(128, Math.max(1, maxContainersPerCycle) * 512))
                 : totalPositions;
-        int visited = 0;
-
-        for (; visited < positionBudget && scanned < maxContainersPerCycle; visited++)
-        {
-            final int scanIndex = advancedMode ? (startIndex + visited) % totalPositions : visited;
-            final int dx = scanIndex % side - radius;
-            final int dy = (scanIndex / side) % side - radius;
-            final int dz = scanIndex / plane - radius;
-            final BlockPos pos = playerPos.offset(dx, dy, dz);
-            if (!advancedMode && !isWithinStorageActivationDistance(pos))
-            {
-                continue;
-            }
-            final BlockEntity blockEntity = mc.level.getBlockEntity(pos);
-            final boolean inAnyZone = isInsideAnyEnabledZone(dimension, pos);
-            final boolean reachable = isReachableContainer(player, pos);
-            final boolean allowUnrestrictedScan = advancedMode && isAdvancedV3() && advancedAutoTakeArmed;
-            if (!(blockEntity instanceof Container container) || (!reachable && !allowUnrestrictedScan) || (!advancedMode && !inAnyZone))
-            {
-                continue;
-            }
-
-            final String containerId = containerId(dimension, pos);
-            if (isContainerInCooldown(containerId, nowMs))
-            {
-                continue;
-            }
-
-            if (advancedMode && (reachable || (isAdvancedV3() && advancedAutoTakeArmed)) && shouldOpenContainerForSnapshot(containerId, nowMs))
-            {
-                tryOpenContainerForSnapshot(mc, player, dimension, pos, containerId, nowMs);
-            }
-
-            final Map<String, Integer> contents;
-            final List<ItemStack> slotContents;
-            try
-            {
-                contents = collectContainerContents(container);
-                slotContents = collectContainerStacks(container);
-            }
-            catch (final Exception e)
-            {
-                recordScanFailure(containerId, dimension, pos, e.getLocalizedMessage(), nowMs);
-                cacheChanged = true;
-                continue;
-            }
-            final String contentHash = Integer.toHexString(contents.hashCode());
-            cacheChanged |= updateScanCache(containerId, dimension, pos, contentHash, nowMs);
-            if (inAnyZone)
-            {
-                scannedZoneContents.put(containerId, contents);
-            }
-            if (advancedMode)
-            {
-                final boolean hasCachedSnapshot = advancedContainerSnapshots.containsKey(containerId);
-                if (!contents.isEmpty() || !hasCachedSnapshot)
-                {
-                    advancedContainerSnapshots.put(containerId, contents);
-                    advancedContainerSlotSnapshots.put(containerId, slotContents);
-                }
-                final Map<String, Integer> advancedContents = contents.isEmpty() && hasCachedSnapshot
-                        ? advancedContainerSnapshots.get(containerId)
-                        : contents;
-                final Map<String, Integer> matches = findAdvancedMatches(advancedContents, player.getName().getString());
-                if (!matches.isEmpty())
-                {
-                    advancedHits.put(containerId, new AdvancedContainerHit(containerId, dimension, pos, matches, nowMs));
-                }
-                else
-                {
-                    advancedHits.remove(containerId);
-                }
-            }
-            scanned++;
-        }
+        final ContainerScanBatch batch = scanContainerCube(mc, player, dimension, playerPos, radius, startIndex, positionBudget, advancedMode, advancedMode, false, seenContainers, nowMs);
+        cacheChanged |= batch.cacheChanged;
 
         if (advancedMode)
         {
-            advancedScanCursorIndex = (startIndex + Math.max(1, visited)) % totalPositions;
+            advancedScanCursorIndex = (startIndex + Math.max(1, batch.visited)) % totalPositions;
         }
 
         if (cacheChanged && store != null)
         {
             store.saveScanCache(scanCache);
         }
+    }
+
+    private ContainerScanBatch scanContainerCube(final Minecraft mc, final Player player, final String dimension, final BlockPos playerPos, final int radius,
+                                                final int startIndex, final int positionBudget, final boolean useCursor, final boolean advancedMode,
+                                                final boolean reachablePriorityPass, final Set<String> seenContainers, final long nowMs)
+    {
+        final int side = radius * 2 + 1;
+        final int plane = side * side;
+        final int totalPositions = plane * side;
+        int visited = 0;
+        int scanned = 0;
+        boolean cacheChanged = false;
+        final int budget = Math.min(totalPositions, Math.max(0, positionBudget));
+
+        for (; visited < budget; visited++)
+        {
+            if (useCursor && scanned >= maxContainersPerCycle)
+            {
+                break;
+            }
+            final int scanIndex = useCursor ? (startIndex + visited) % totalPositions : visited;
+            final int dx = scanIndex % side - radius;
+            final int dy = (scanIndex / side) % side - radius;
+            final int dz = scanIndex / plane - radius;
+            final BlockPos pos = playerPos.offset(dx, dy, dz);
+            final ContainerScanResult result = processContainerAt(mc, player, dimension, pos, advancedMode, reachablePriorityPass, seenContainers, nowMs);
+            if (result.processed)
+            {
+                scanned++;
+            }
+            cacheChanged |= result.cacheChanged;
+        }
+
+        return new ContainerScanBatch(visited, cacheChanged);
+    }
+
+    private ContainerScanResult processContainerAt(final Minecraft mc, final Player player, final String dimension, final BlockPos pos, final boolean advancedMode,
+                                                  final boolean reachablePriorityPass, final Set<String> seenContainers, final long nowMs)
+    {
+        if (!advancedMode && !isWithinStorageActivationDistance(pos))
+        {
+            return ContainerScanResult.SKIPPED;
+        }
+
+        final BlockEntity blockEntity = mc.level.getBlockEntity(pos);
+        if (!(blockEntity instanceof Container container))
+        {
+            return ContainerScanResult.SKIPPED;
+        }
+
+        final boolean reachable = isReachableContainer(player, pos);
+        if (reachablePriorityPass && !reachable)
+        {
+            return ContainerScanResult.SKIPPED;
+        }
+
+        final boolean inAnyZone = isInsideAnyEnabledZone(dimension, pos);
+        if (!advancedMode && (!reachable || !inAnyZone))
+        {
+            return ContainerScanResult.SKIPPED;
+        }
+
+        final String containerId = containerId(mc, dimension, pos);
+        if (!seenContainers.add(containerId) || isContainerInCooldown(containerId, nowMs))
+        {
+            return ContainerScanResult.SKIPPED;
+        }
+
+        if (advancedMode && reachable && shouldOpenContainerForSnapshot(containerId, nowMs))
+        {
+            tryOpenContainerForSnapshot(mc, player, dimension, pos, containerId, nowMs);
+        }
+
+        final Map<String, Integer> contents;
+        final List<ItemStack> slotContents;
+        try
+        {
+            contents = collectContainerContents(mc, pos, container);
+            slotContents = collectContainerStacks(mc, pos, container);
+        }
+        catch (final Exception e)
+        {
+            recordScanFailure(containerId, dimension, pos, e.getLocalizedMessage(), nowMs);
+            return ContainerScanResult.CHANGED;
+        }
+
+        boolean cacheChanged = updateScanCache(containerId, dimension, canonicalContainerPos(mc, pos), Integer.toHexString(contents.hashCode()), nowMs);
+        if (inAnyZone)
+        {
+            scannedZoneContents.put(containerId, contents);
+        }
+        if (advancedMode)
+        {
+            final boolean hasCachedSnapshot = advancedContainerSnapshots.containsKey(containerId);
+            if (!contents.isEmpty() || !hasCachedSnapshot)
+            {
+                advancedContainerSnapshots.put(containerId, contents);
+                advancedContainerSlotSnapshots.put(containerId, slotContents);
+            }
+            final Map<String, Integer> advancedContents = contents.isEmpty() && hasCachedSnapshot
+                    ? advancedContainerSnapshots.get(containerId)
+                    : contents;
+            final Map<String, Integer> matches = findAdvancedMatches(advancedContents, player.getName().getString());
+            if (!matches.isEmpty())
+            {
+                advancedHits.put(containerId, new AdvancedContainerHit(containerId, dimension, canonicalContainerPos(mc, pos), matches, nowMs));
+            }
+            else
+            {
+                advancedHits.remove(containerId);
+            }
+        }
+
+        return new ContainerScanResult(true, cacheChanged);
     }
 
     private boolean shouldOpenContainerForSnapshot(final String containerId, final long nowMs)
@@ -1516,7 +1574,12 @@ public class ThirdPartySyncService extends AbstractService
         {
             return false;
         }
-        if (advancedContainerSnapshots.containsKey(containerId) && nowMs - lastAdvancedOpenMs < Math.max(advancedSafeActionIntervalMs, advancedScanIntervalMs))
+        final Long lastContainerOpenMs = advancedContainerOpenTimes.get(containerId);
+        final boolean hasConfirmedSlotSnapshot = lastContainerOpenMs != null
+                && advancedContainerSlotSnapshots.containsKey(containerId)
+                && !advancedContainerSlotSnapshots.getOrDefault(containerId, Collections.emptyList()).isEmpty();
+        if (hasConfirmedSlotSnapshot
+                && nowMs - lastContainerOpenMs < Math.max(30000L, Math.max(advancedSafeActionIntervalMs, advancedScanIntervalMs) * 5L))
         {
             return false;
         }
@@ -1547,15 +1610,18 @@ public class ThirdPartySyncService extends AbstractService
         try
         {
             final BlockHitResult hit = advancedOpenHitResult(mc, player, pos);
-            mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND, hit);
             pendingAdvancedOpenContainerId = containerId;
             pendingAdvancedOpenDimension = dimension;
             pendingAdvancedOpenPos = pos.immutable();
             pendingAdvancedOpenStartedMs = nowMs;
             lastAdvancedOpenMs = nowMs;
+            advancedContainerOpenTimes.put(containerId, nowMs);
+            mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND, hit);
         }
         catch (final Exception e)
         {
+            advancedContainerOpenTimes.remove(containerId);
+            clearPendingAdvancedOpen();
             recordScanFailure(containerId, dimension, pos, e.getLocalizedMessage(), nowMs);
         }
     }
@@ -1596,16 +1662,32 @@ public class ThirdPartySyncService extends AbstractService
             return;
         }
 
-        if (mc.screen instanceof AbstractContainerScreen<?>)
+        if (pendingAdvancedCloseAtMs > 0L)
+        {
+            if (nowMs >= pendingAdvancedCloseAtMs)
+            {
+                closeAdvancedContainer(mc);
+                clearPendingAdvancedOpen();
+            }
+            return;
+        }
+
+        if (mc.player.containerMenu != null && hasExternalContainerSlots(mc.player.getInventory(), mc.player.containerMenu.slots))
         {
             final Map<String, Integer> contents = collectOpenContainerContents(mc.player.getInventory(), mc.player.containerMenu.slots);
             final List<ItemStack> slotContents = collectOpenContainerStacks(mc.player.getInventory(), mc.player.containerMenu.slots);
             cacheAdvancedContainerSnapshot(pendingAdvancedOpenContainerId, pendingAdvancedOpenDimension, pendingAdvancedOpenPos, contents, slotContents, nowMs);
-            if (advancedAutoTakeArmed && (isAdvancedV2() || isAdvancedV3()))
+            if (advancedAutoTakeArmed && (isAdvancedV2() || isAdvancedV3()) && !pendingAdvancedAutoTakeAttempted)
             {
-                autoTakeClaimedItems(mc, nowMs);
+                pendingAdvancedAutoTakeAttempted = true;
+                final int moved = autoTakeClaimedItems(mc, nowMs);
+                if (moved > 0)
+                {
+                    pendingAdvancedCloseAtMs = nowMs + advancedPostTakeCloseDelayMs();
+                    return;
+                }
             }
-            mc.player.closeContainer();
+            closeAdvancedContainer(mc);
             clearPendingAdvancedOpen();
             return;
         }
@@ -1613,8 +1695,142 @@ public class ThirdPartySyncService extends AbstractService
         if (nowMs - pendingAdvancedOpenStartedMs > 3500L)
         {
             recordScanFailure(pendingAdvancedOpenContainerId, pendingAdvancedOpenDimension, pendingAdvancedOpenPos, "open timeout", nowMs);
+            advancedContainerOpenTimes.remove(pendingAdvancedOpenContainerId);
+            closeAdvancedContainer(mc);
             clearPendingAdvancedOpen();
         }
+    }
+
+    private long advancedPostTakeCloseDelayMs()
+    {
+        return Math.max(120L, Math.min(500L, Math.max(advancedSafeActionIntervalMs, 800) / 4L));
+    }
+
+    private void closeAdvancedContainer(final Minecraft mc)
+    {
+        if (mc == null || mc.player == null)
+        {
+            return;
+        }
+        try
+        {
+            if (mc.player.containerMenu != null && hasExternalContainerSlots(mc.player.getInventory(), mc.player.containerMenu.slots))
+            {
+                mc.player.closeContainer();
+            }
+        }
+        finally
+        {
+            if (mc.screen instanceof AbstractContainerScreen<?>)
+            {
+                mc.setScreen(null);
+            }
+        }
+    }
+
+    private void observeManuallyOpenedContainer(final long nowMs)
+    {
+        if (!pendingAdvancedOpenContainerId.isBlank())
+        {
+            return;
+        }
+
+        final Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.player == null || mc.level == null || !(mc.screen instanceof AbstractContainerScreen<?>)
+                || mc.player.containerMenu == null
+                || !hasExternalContainerSlots(mc.player.getInventory(), mc.player.containerMenu.slots))
+        {
+            observedOpenContainerId = "";
+            observedOpenContentHash = "";
+            return;
+        }
+
+        final BlockPos pos = currentOpenContainerPos(mc);
+        if (pos == null)
+        {
+            return;
+        }
+
+        final String dimension = mc.level.dimension().identifier().toString();
+        final String containerId = containerId(mc, dimension, pos);
+        final Map<String, Integer> contents = collectOpenContainerContents(mc.player.getInventory(), mc.player.containerMenu.slots);
+        final List<ItemStack> slotContents = collectOpenContainerStacks(mc.player.getInventory(), mc.player.containerMenu.slots);
+        final String contentHash = Integer.toHexString(contents.hashCode()) + ":" + slotContentsHash(slotContents);
+        if (containerId.equals(observedOpenContainerId) && contentHash.equals(observedOpenContentHash))
+        {
+            return;
+        }
+
+        observedOpenContainerId = containerId;
+        observedOpenContentHash = contentHash;
+        cacheAdvancedContainerSnapshot(containerId, dimension, canonicalContainerPos(mc, pos), contents, slotContents, nowMs);
+    }
+
+    private BlockPos currentOpenContainerPos(final Minecraft mc)
+    {
+        if (mc == null || mc.level == null || mc.player == null)
+        {
+            return null;
+        }
+        if (mc.hitResult instanceof BlockHitResult hit)
+        {
+            final BlockPos pos = hit.getBlockPos();
+            if (mc.level.getBlockEntity(pos) instanceof Container && isReachableContainer(mc.player, pos))
+            {
+                return pos;
+            }
+        }
+        return nearestReachableContainerPos(mc);
+    }
+
+    private BlockPos nearestReachableContainerPos(final Minecraft mc)
+    {
+        if (mc == null || mc.level == null || mc.player == null)
+        {
+            return null;
+        }
+        final Player player = mc.player;
+        final BlockPos playerPos = player.blockPosition();
+        final int radius = Math.max(1, (int) Math.ceil(player.blockInteractionRange()) + 1);
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (int dx = -radius; dx <= radius; dx++)
+        {
+            for (int dy = -radius; dy <= radius; dy++)
+            {
+                for (int dz = -radius; dz <= radius; dz++)
+                {
+                    final BlockPos pos = playerPos.offset(dx, dy, dz);
+                    if (!(mc.level.getBlockEntity(pos) instanceof Container) || !isReachableContainer(player, pos))
+                    {
+                        continue;
+                    }
+                    final double distance = Vec3.atCenterOf(pos).distanceToSqr(player.getEyePosition());
+                    if (distance < bestDistance)
+                    {
+                        bestDistance = distance;
+                        best = pos.immutable();
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean hasExternalContainerSlots(final Inventory playerInventory, final List<Slot> slots)
+    {
+        if (slots == null)
+        {
+            return false;
+        }
+        for (final Slot slot : slots)
+        {
+            if (slot != null && slot.container != playerInventory)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Map<String, Integer> collectOpenContainerContents(final Inventory playerInventory, final List<Slot> slots)
@@ -1653,6 +1869,30 @@ public class ThirdPartySyncService extends AbstractService
         return stacks;
     }
 
+    private String slotContentsHash(final List<ItemStack> stacks)
+    {
+        if (stacks == null || stacks.isEmpty())
+        {
+            return "";
+        }
+        final StringBuilder builder = new StringBuilder();
+        for (final ItemStack stack : stacks)
+        {
+            if (stack == null || stack.isEmpty())
+            {
+                builder.append(";");
+                continue;
+            }
+            builder.append(itemId(stack))
+                    .append('#')
+                    .append(stack.getCount())
+                    .append('#')
+                    .append(nbtHash(stack))
+                    .append(';');
+        }
+        return Integer.toHexString(builder.toString().hashCode());
+    }
+
     private void cacheAdvancedContainerSnapshot(final String containerId, final String dimension, final BlockPos pos, final Map<String, Integer> contents, final long nowMs)
     {
         cacheAdvancedContainerSnapshot(containerId, dimension, pos, contents, Collections.emptyList(), nowMs);
@@ -1668,6 +1908,7 @@ public class ThirdPartySyncService extends AbstractService
         if (slotContents != null && !slotContents.isEmpty())
         {
             advancedContainerSlotSnapshots.put(containerId, copyStacks(slotContents));
+            advancedContainerOpenTimes.put(containerId, nowMs);
         }
         if (isInsideAnyEnabledZone(dimension, pos))
         {
@@ -1691,20 +1932,22 @@ public class ThirdPartySyncService extends AbstractService
         }
     }
 
-    private void autoTakeClaimedItems(final Minecraft mc, final long nowMs)
+    private int autoTakeClaimedItems(final Minecraft mc, final long nowMs)
     {
         if (mc == null || mc.gameMode == null || mc.player == null || mc.player.containerMenu == null)
         {
-            return;
+            return 0;
         }
         final int maxMoves = isAdvancedV3() ? Math.min(8, Math.max(1, maxContainersPerCycle)) : 1;
         int moved = 0;
-        for (final Slot slot : mc.player.containerMenu.slots)
+        final List<Slot> slots = mc.player.containerMenu.slots;
+        for (int slotId = 0; slotId < slots.size(); slotId++)
         {
             if (moved >= maxMoves)
             {
                 break;
             }
+            final Slot slot = slots.get(slotId);
             if (slot == null || slot.container == mc.player.getInventory() || !slot.hasItem())
             {
                 continue;
@@ -1715,7 +1958,7 @@ public class ThirdPartySyncService extends AbstractService
             }
             try
             {
-                mc.gameMode.handleContainerInput(mc.player.containerMenu.containerId, slot.index, 0, ContainerInput.QUICK_MOVE, mc.player);
+                mc.gameMode.handleContainerInput(mc.player.containerMenu.containerId, slotId, 0, ContainerInput.QUICK_MOVE, mc.player);
                 moved++;
             }
             catch (final Exception e)
@@ -1724,6 +1967,7 @@ public class ThirdPartySyncService extends AbstractService
                 break;
             }
         }
+        return moved;
     }
 
     private boolean isClaimedStockingStack(final ItemStack stack, final String playerName)
@@ -1764,19 +2008,18 @@ public class ThirdPartySyncService extends AbstractService
         pendingAdvancedOpenDimension = "";
         pendingAdvancedOpenPos = null;
         pendingAdvancedOpenStartedMs = 0L;
+        pendingAdvancedCloseAtMs = 0L;
+        pendingAdvancedAutoTakeAttempted = false;
     }
 
     private int advancedScanRadius(final Player player)
     {
-        if (isAdvancedV3())
+        final Minecraft mc = Minecraft.getInstance();
+        final int renderDistance = mc != null && mc.options != null ? mc.options.renderDistance().get() : 8;
+        final int renderRadius = Math.max(1, Math.min(renderDistance * 16, 96));
+        if (advancedStockingEnabled)
         {
-            if (advancedAutoTakeArmed)
-            {
-                final Minecraft mc = Minecraft.getInstance();
-                final int renderDistance = mc != null && mc.options != null ? mc.options.renderDistance().get() : 8;
-                return Math.max(1, Math.min(renderDistance * 16, 96));
-            }
-            return Math.max(1, (int) Math.ceil(player.blockInteractionRange()));
+            return renderRadius;
         }
         return Math.max(1, (int) Math.ceil(player.blockInteractionRange()));
     }
@@ -1929,6 +2172,17 @@ public class ThirdPartySyncService extends AbstractService
         return counts;
     }
 
+    private Map<String, Integer> collectContainerContents(final Minecraft mc, final BlockPos pos, final Container container)
+    {
+        final Map<String, Integer> counts = collectContainerContents(container);
+        final Container connected = connectedChestContainer(mc, pos);
+        if (connected != null && connected != container)
+        {
+            collectContainerContents(connected).forEach((key, amount) -> counts.merge(key, amount, Integer::sum));
+        }
+        return counts;
+    }
+
     private List<ItemStack> collectContainerStacks(final Container container)
     {
         final List<ItemStack> stacks = new ArrayList<>();
@@ -1942,6 +2196,50 @@ public class ThirdPartySyncService extends AbstractService
             stacks.add(stack == null || stack.isEmpty() ? ItemStack.EMPTY : stack.copy());
         }
         return stacks;
+    }
+
+    private List<ItemStack> collectContainerStacks(final Minecraft mc, final BlockPos pos, final Container container)
+    {
+        final List<ItemStack> stacks = collectContainerStacks(container);
+        final Container connected = connectedChestContainer(mc, pos);
+        if (connected != null && connected != container)
+        {
+            stacks.addAll(collectContainerStacks(connected));
+        }
+        return stacks;
+    }
+
+    private Container connectedChestContainer(final Minecraft mc, final BlockPos pos)
+    {
+        if (mc == null || mc.level == null || pos == null)
+        {
+            return null;
+        }
+        final BlockPos connectedPos = connectedChestPos(mc, pos);
+        if (connectedPos == null)
+        {
+            return null;
+        }
+        final BlockEntity blockEntity = mc.level.getBlockEntity(connectedPos);
+        return blockEntity instanceof Container container ? container : null;
+    }
+
+    private Vec3 containerCenter(final Minecraft mc, final BlockPos pos)
+    {
+        if (pos == null)
+        {
+            return Vec3.ZERO;
+        }
+        final BlockPos connected = connectedChestPos(mc, pos);
+        if (connected == null)
+        {
+            return Vec3.atCenterOf(pos);
+        }
+        return new Vec3(
+                (pos.getX() + connected.getX()) / 2.0D + 0.5D,
+                (pos.getY() + connected.getY()) / 2.0D + 0.5D,
+                (pos.getZ() + connected.getZ()) / 2.0D + 0.5D
+        );
     }
 
     private static List<ItemStack> copyStacks(final List<ItemStack> stacks)
@@ -2135,6 +2433,46 @@ public class ThirdPartySyncService extends AbstractService
         return dimension + "|" + pos.getX() + "," + pos.getY() + "," + pos.getZ();
     }
 
+    private String containerId(final Minecraft mc, final String dimension, final BlockPos pos)
+    {
+        return containerId(dimension, canonicalContainerPos(mc, pos));
+    }
+
+    private BlockPos canonicalContainerPos(final Minecraft mc, final BlockPos pos)
+    {
+        final BlockPos connected = connectedChestPos(mc, pos);
+        if (connected == null)
+        {
+            return pos;
+        }
+        if (connected.getX() < pos.getX()
+                || connected.getX() == pos.getX() && connected.getY() < pos.getY()
+                || connected.getX() == pos.getX() && connected.getY() == pos.getY() && connected.getZ() < pos.getZ())
+        {
+            return connected;
+        }
+        return pos;
+    }
+
+    private BlockPos connectedChestPos(final Minecraft mc, final BlockPos pos)
+    {
+        if (mc == null || mc.level == null || pos == null)
+        {
+            return null;
+        }
+        final BlockState state = mc.level.getBlockState(pos);
+        if (!(state.getBlock() instanceof ChestBlock) || !state.hasProperty(ChestBlock.TYPE))
+        {
+            return null;
+        }
+        final ChestType type = state.getValue(ChestBlock.TYPE);
+        if (type == ChestType.SINGLE)
+        {
+            return null;
+        }
+        return ChestBlock.getConnectedBlockPos(pos, state);
+    }
+
     private boolean hasPendingOperations()
     {
         synchronized (this)
@@ -2165,18 +2503,16 @@ public class ThirdPartySyncService extends AbstractService
         final int centerY = gui.guiHeight() / 2;
         final String dimension = mc.level == null ? "" : mc.level.dimension().identifier().toString();
         final boolean previewPressed = showContainerPreview && isPreviewKeyPressed(mc);
-        final String targetedContainerId = previewPressed ? targetedContainerId(mc) : "";
+        final String targetedContainerId = previewPressed ? targetedContainerId(mc, centerX, centerY) : "";
         refreshAdvancedHitsFromSnapshots(dimension, System.currentTimeMillis());
         int index = 0;
-        for (final AdvancedContainerHit hit : new ArrayList<>(advancedHits.values()))
+        final List<AdvancedContainerHit> hits = new ArrayList<>(advancedHits.values());
+        hits.sort(Comparator.comparingDouble(hit -> containerCenter(mc, hit.position).distanceToSqr(mc.player.getEyePosition())));
+        for (final AdvancedContainerHit hit : hits)
         {
             if (!dimension.equals(hit.dimension))
             {
                 continue;
-            }
-            if (index >= Math.min(3, maxContainersPerCycle))
-            {
-                break;
             }
 
             final ScreenPoint point = screenPointForContainer(mc, hit.position, centerX, centerY);
@@ -2329,7 +2665,7 @@ public class ThirdPartySyncService extends AbstractService
         {
             return null;
         }
-        return screenPointForWorldPos(mc, Vec3.atCenterOf(pos), centerX, centerY, advancedDisplayDistance(mc.player));
+        return screenPointForWorldPos(mc, containerCenter(mc, pos), centerX, centerY, advancedDisplayDistance(mc.player));
     }
 
     private ScreenPoint screenPointForWorldPos(final Minecraft mc, final Vec3 target, final int centerX, final int centerY, final double maxDistance)
@@ -2353,13 +2689,13 @@ public class ThirdPartySyncService extends AbstractService
             return null;
         }
 
-        Vec3 right = new Vec3(forward.z, 0.0D, -forward.x);
+        Vec3 right = forward.cross(Vec3.Y_AXIS);
         if (right.lengthSqr() < 0.0001D)
         {
             right = Vec3.X_AXIS;
         }
         right = right.normalize();
-        final Vec3 up = forward.cross(right).normalize();
+        final Vec3 up = right.cross(forward).normalize();
         final double horizontal = toTarget.dot(right) / depth;
         final double vertical = toTarget.dot(up) / depth;
         final int maxX = Math.max(20, centerX - 12);
@@ -2375,7 +2711,7 @@ public class ThirdPartySyncService extends AbstractService
         {
             return 0.0D;
         }
-        if (isAdvancedV3() && advancedAutoTakeArmed)
+        if (advancedStockingEnabled)
         {
             return advancedScanRadius(player) + 1.0D;
         }
@@ -2457,19 +2793,59 @@ public class ThirdPartySyncService extends AbstractService
         return GLFW.glfwGetKey(mc.getWindow().handle(), containerPreviewKeyCode) == GLFW.GLFW_PRESS;
     }
 
-    private String targetedContainerId(final Minecraft mc)
+    private String targetedContainerId(final Minecraft mc, final int centerX, final int centerY)
     {
         if (mc == null || mc.level == null || !(mc.hitResult instanceof BlockHitResult hit))
         {
-            return "";
+            return nearestProjectedSnapshotId(mc, centerX, centerY);
         }
         final BlockPos pos = hit.getBlockPos();
         final BlockEntity blockEntity = mc.level.getBlockEntity(pos);
-        if (!(blockEntity instanceof Container))
+        if (blockEntity instanceof Container)
+        {
+            final String id = containerId(mc, mc.level.dimension().identifier().toString(), pos);
+            if (advancedContainerSnapshots.containsKey(id) || advancedContainerSlotSnapshots.containsKey(id))
+            {
+                return id;
+            }
+        }
+        return nearestProjectedSnapshotId(mc, centerX, centerY);
+    }
+
+    private String nearestProjectedSnapshotId(final Minecraft mc, final int centerX, final int centerY)
+    {
+        if (mc == null || mc.level == null)
         {
             return "";
         }
-        return containerId(mc.level.dimension().identifier().toString(), pos);
+        final String dimension = mc.level.dimension().identifier().toString();
+        String bestId = "";
+        double bestDistance = 36.0D * 36.0D;
+        final Set<String> ids = new HashSet<>(advancedContainerSnapshots.keySet());
+        ids.addAll(advancedContainerSlotSnapshots.keySet());
+        ids.addAll(advancedHits.keySet());
+        for (final String id : ids)
+        {
+            final ScannedPosition scanned = ScannedPosition.fromContainerId(id);
+            if (scanned == null || !dimension.equals(scanned.dimension))
+            {
+                continue;
+            }
+            final ScreenPoint point = screenPointForContainer(mc, scanned.position, centerX, centerY);
+            if (point == null)
+            {
+                continue;
+            }
+            final double dx = point.x - centerX;
+            final double dy = point.y - centerY;
+            final double distance = dx * dx + dy * dy;
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestId = id;
+            }
+        }
+        return bestId;
     }
 
     private List<ContainerPreviewEntry> previewEntries(final Map<String, Integer> counts, final int limit)
@@ -3292,6 +3668,33 @@ public class ThirdPartySyncService extends AbstractService
         {
             this.x = x;
             this.y = y;
+        }
+    }
+
+    private static final class ContainerScanBatch
+    {
+        private final int visited;
+        private final boolean cacheChanged;
+
+        private ContainerScanBatch(final int visited, final boolean cacheChanged)
+        {
+            this.visited = visited;
+            this.cacheChanged = cacheChanged;
+        }
+    }
+
+    private static final class ContainerScanResult
+    {
+        private static final ContainerScanResult SKIPPED = new ContainerScanResult(false, false);
+        private static final ContainerScanResult CHANGED = new ContainerScanResult(true, true);
+
+        private final boolean processed;
+        private final boolean cacheChanged;
+
+        private ContainerScanResult(final boolean processed, final boolean cacheChanged)
+        {
+            this.processed = processed;
+            this.cacheChanged = cacheChanged;
         }
     }
 
