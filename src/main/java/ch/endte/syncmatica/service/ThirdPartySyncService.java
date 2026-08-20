@@ -20,7 +20,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import fi.dy.masa.litematica.materials.MaterialListEntry;
 import fi.dy.masa.litematica.materials.MaterialListUtils;
+import fi.dy.masa.litematica.util.InventoryUtils;
 import fi.dy.masa.malilib.gui.Message;
+import fi.dy.masa.malilib.render.InventoryOverlayContext;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
@@ -1503,6 +1505,20 @@ public class ThirdPartySyncService extends AbstractService
                 continue;
             }
 
+            if (isAdvancedServerInventoryMode())
+            {
+                final ContainerSnapshot snapshot = readLitematicaContainerSnapshot(mc, scanned.position);
+                if (snapshot == null)
+                {
+                    continue;
+                }
+                cacheAdvancedContainerSnapshot(containerId, dimension, canonicalContainerPos(mc, scanned.position), snapshot.contents, snapshot.slotContents, nowMs);
+                visitedThisTick.add(containerId);
+                advancedContainerPollCursor = (index + 1) % queueSize;
+                lastAdvancedPollMs = nowMs;
+                return true;
+            }
+
             final BlockEntity blockEntity = mc.level.getBlockEntity(scanned.position);
             if (!(blockEntity instanceof Container container))
             {
@@ -1569,8 +1585,9 @@ public class ThirdPartySyncService extends AbstractService
             return ContainerScanResult.SKIPPED;
         }
 
+        final boolean serverInventoryMode = advancedMode && isAdvancedServerInventoryMode();
         final boolean reachable = isReachableContainer(player, pos);
-        if (!reachable && advancedMode)
+        if (!reachable && advancedMode && !serverInventoryMode)
         {
             queueAdvancedContainer(containerId, canonicalContainerPos(mc, pos), dimension, false);
             return ContainerScanResult.SKIPPED;
@@ -1587,7 +1604,19 @@ public class ThirdPartySyncService extends AbstractService
             return ContainerScanResult.SKIPPED;
         }
 
-        if (advancedMode && reachable && shouldOpenContainerForSnapshot(containerId, nowMs))
+        if (serverInventoryMode)
+        {
+            final ContainerSnapshot snapshot = readLitematicaContainerSnapshot(mc, pos);
+            if (snapshot != null)
+            {
+                cacheAdvancedContainerSnapshot(containerId, dimension, canonicalContainerPos(mc, pos), snapshot.contents, snapshot.slotContents, nowMs);
+                return ContainerScanResult.CHANGED;
+            }
+            queueAdvancedContainer(containerId, canonicalContainerPos(mc, pos), dimension, false);
+            return ContainerScanResult.SKIPPED;
+        }
+
+        if (advancedMode && !serverInventoryMode && reachable && shouldOpenContainerForSnapshot(containerId, nowMs))
         {
             tryOpenContainerForSnapshot(mc, player, dimension, pos, containerId, nowMs);
         }
@@ -2302,6 +2331,31 @@ public class ThirdPartySyncService extends AbstractService
             addStackCounts(counts, container.getItem(i), 0);
         }
         return counts;
+    }
+
+    private ContainerSnapshot readLitematicaContainerSnapshot(final Minecraft mc, final BlockPos pos)
+    {
+        if (mc == null || mc.level == null || pos == null)
+        {
+            return null;
+        }
+        try
+        {
+            final InventoryOverlayContext context = InventoryUtils.getTargetInventory(mc.level, pos);
+            if (context == null || context.inv() == null || context.inv().getContainerSize() <= 0)
+            {
+                return null;
+            }
+            final Container container = context.inv();
+            final Map<String, Integer> contents = collectContainerContents(container);
+            final List<ItemStack> slotContents = collectContainerStacks(container);
+            return new ContainerSnapshot(contents, slotContents);
+        }
+        catch (final Exception e)
+        {
+            Syncmatica.LOGGER.debug("Failed to read Litematica container snapshot at {}: {}", pos, e.getLocalizedMessage());
+            return null;
+        }
     }
 
     private Map<String, Integer> collectContainerContents(final Minecraft mc, final BlockPos pos, final Container container)
@@ -3807,6 +3861,18 @@ public class ThirdPartySyncService extends AbstractService
         }
     }
 
+    private static final class ContainerSnapshot
+    {
+        private final Map<String, Integer> contents;
+        private final List<ItemStack> slotContents;
+
+        private ContainerSnapshot(final Map<String, Integer> contents, final List<ItemStack> slotContents)
+        {
+            this.contents = contents == null ? Collections.emptyMap() : contents;
+            this.slotContents = slotContents == null ? Collections.emptyList() : slotContents;
+        }
+    }
+
     private static final class ContainerScanBatch
     {
         private final int visited;
@@ -3910,6 +3976,10 @@ public class ThirdPartySyncService extends AbstractService
 
     private static String normalizeAdvancedMode(final String value)
     {
+        if ("server_inventory".equalsIgnoreCase(value))
+        {
+            return "server_inventory";
+        }
         if ("v2_safe_take".equalsIgnoreCase(value))
         {
             return "v2_safe_take";
@@ -3919,6 +3989,11 @@ public class ThirdPartySyncService extends AbstractService
             return "v3_unrestricted_take";
         }
         return "v1_scan";
+    }
+
+    private boolean isAdvancedServerInventoryMode()
+    {
+        return "server_inventory".equalsIgnoreCase(advancedStockingMode);
     }
 
     private boolean isAdvancedV2()

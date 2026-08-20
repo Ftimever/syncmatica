@@ -639,6 +639,7 @@ public final class SyncmaticaConfigOptions
 
     private enum AdvancedStockingMode implements IConfigOptionListEntry
     {
+        SERVER_INVENTORY("server_inventory", "服务器库存"),
         V1_SCAN("v1_scan", "V1 指引扫描"),
         V2_SAFE_TAKE("v2_safe_take", "V2 安全取货"),
         V3_UNRESTRICTED_TAKE("v3_unrestricted_take", "V3 视距取货");
