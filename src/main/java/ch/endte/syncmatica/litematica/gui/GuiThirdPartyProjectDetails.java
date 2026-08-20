@@ -35,9 +35,7 @@ public class GuiThirdPartyProjectDetails extends GuiBase
     private int selectedMaterialIndex;
     private int claimDraftAmount;
     private boolean claimSliderDragging;
-    private boolean pendingClaimOverride;
     private String pendingClaimMaterialKey = "";
-    private int pendingClaimAmount;
     private GuiTextFieldGeneric projectNameField;
     private boolean editingCornerA = true;
 
@@ -78,6 +76,8 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         addButton(button, (b, mouseButton) -> {
             service().recomputeLocalCollectedNow();
             service().refreshProjectDetails(record);
+            clearClaimPreview();
+            claimDraftAmount = currentClaimAmount(selectedMaterial());
         });
         x += buttonWidth + 4;
 
@@ -193,7 +193,6 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         if (isOverClaimSlider((int) event.x(), (int) event.y()))
         {
             final ProjectMaterial material = selectedMaterial();
-            pendingClaimOverride = false;
             pendingClaimMaterialKey = material == null ? "" : material.materialKey;
             claimSliderDragging = true;
             updateClaimDraftFromMouse((int) event.x());
@@ -204,7 +203,6 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         if (row >= 0)
         {
             selectedMaterialIndex = row;
-            pendingClaimOverride = false;
             pendingClaimMaterialKey = "";
             claimDraftAmount = currentClaimAmount(selectedMaterial());
             return true;
@@ -320,6 +318,7 @@ public class GuiThirdPartyProjectDetails extends GuiBase
             return;
         }
 
+        clampClaimDraftAmount(material);
         final int collected = collectedAmount(material);
         final int reserved = previewReservedAmount(material);
         drawString(ctx, trim(material.displayName, 22), panelX + 10, panelY + 30, 0xFFFFFFFF);
@@ -497,10 +496,6 @@ public class GuiThirdPartyProjectDetails extends GuiBase
 
     private int currentClaimAmount(final ProjectMaterial material)
     {
-        if (material != null && pendingClaimOverride && material.materialKey.equals(pendingClaimMaterialKey))
-        {
-            return pendingClaimAmount;
-        }
         return recordClaimAmount(material);
     }
 
@@ -517,7 +512,7 @@ public class GuiThirdPartyProjectDetails extends GuiBase
             return 0;
         }
         final int collected = collectedAmount(material);
-        final int myClaim = currentClaimAmount(material);
+        final int myClaim = recordClaimAmount(material);
         return Math.max(0, material.required - collected - Math.max(0, reservedAmount(material) - myClaim));
     }
 
@@ -549,7 +544,7 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         {
             return 0;
         }
-        if ((claimSliderDragging || pendingClaimOverride) && material.materialKey.equals(pendingClaimMaterialKey))
+        if (claimSliderDragging && material.materialKey.equals(pendingClaimMaterialKey))
         {
             return Math.max(0, reservedAmount(material) - recordClaimAmount(material) + claimDraftAmount);
         }
@@ -570,6 +565,7 @@ public class GuiThirdPartyProjectDetails extends GuiBase
         final int x = operationPanelX() + 10;
         final double ratio = Math.min(1.0D, Math.max(0.0D, (mouseX - x) / 146.0D));
         claimDraftAmount = (int) Math.round(max * ratio);
+        clampClaimDraftAmount(material);
     }
 
     private void applyClaimDraft()
@@ -580,20 +576,36 @@ public class GuiThirdPartyProjectDetails extends GuiBase
             return;
         }
 
-        final int current = currentClaimAmount(material);
+        clampClaimDraftAmount(material);
+        final int current = recordClaimAmount(material);
         if (claimDraftAmount == current)
         {
+            clearClaimPreview();
             return;
         }
-        pendingClaimOverride = true;
-        pendingClaimMaterialKey = material.materialKey;
-        pendingClaimAmount = claimDraftAmount;
+        clearClaimPreview();
         if (claimDraftAmount <= 0)
         {
             service().claimMaterial(record.getProjectId(), material.materialKey, 0);
             return;
         }
         service().claimMaterial(record.getProjectId(), material.materialKey, claimDraftAmount);
+    }
+
+    private void clampClaimDraftAmount(final ProjectMaterial material)
+    {
+        if (material == null)
+        {
+            claimDraftAmount = 0;
+            return;
+        }
+        final int max = maxClaimAmount(material);
+        claimDraftAmount = Math.max(0, Math.min(claimDraftAmount, max));
+    }
+
+    private void clearClaimPreview()
+    {
+        pendingClaimMaterialKey = "";
     }
 
     private int materialRowAt(final int mouseX, final int mouseY)

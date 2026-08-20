@@ -177,6 +177,7 @@ public class ThirdPartySyncService extends AbstractService
     private final Map<String, List<ItemStack>> advancedContainerSlotSnapshots = new LinkedHashMap<>();
     private final Map<String, Long> advancedContainerOpenTimes = new LinkedHashMap<>();
     private final Map<String, AdvancedContainerHit> advancedHits = new LinkedHashMap<>();
+    private final List<String> advancedContainerPollOrder = new ArrayList<>();
     private JsonObject scanCache = new JsonObject();
     private JsonObject claimsCache = new JsonObject();
     private long lastAggregateRecomputeMs = 0L;
@@ -185,6 +186,7 @@ public class ThirdPartySyncService extends AbstractService
     private long lastAdvancedOpenMs = 0L;
     private long lastPendingFlushMs = 0L;
     private int advancedScanCursorIndex = 0;
+    private int advancedContainerPollCursor = 0;
     private String connectedNotificationBaseUrl = "";
     private String pendingAdvancedOpenContainerId = "";
     private String pendingAdvancedOpenDimension = "";
@@ -194,6 +196,7 @@ public class ThirdPartySyncService extends AbstractService
     private boolean pendingAdvancedAutoTakeAttempted = false;
     private String observedOpenContainerId = "";
     private String observedOpenContentHash = "";
+    private long lastAdvancedPollMs = 0L;
     private String storageZonePreviewProjectId = "";
     private String storageZonePreviewDimension = "";
     private BlockPos storageZonePreviewFirstCorner;
@@ -854,6 +857,7 @@ public class ThirdPartySyncService extends AbstractService
                             final JsonObject response = apiClient.deleteClaim(claim.claimId);
                             notifyThirdPartyConnectionSucceeded();
                             record.mergeProjectDetails(response);
+                            recomputeMaterialReserved(record);
                         }
                         catch (final Exception e)
                         {
@@ -897,9 +901,11 @@ public class ThirdPartySyncService extends AbstractService
                     final JsonObject response = apiClient.upsertClaim(projectId, body);
                     notifyThirdPartyConnectionSucceeded();
                     record.mergeProjectDetails(response);
+                    recomputeMaterialReserved(record);
                     for (int i = 1; i < existingClaims.size(); i++)
                     {
                         record.mergeProjectDetails(apiClient.deleteClaim(existingClaims.get(i).claimId));
+                        recomputeMaterialReserved(record);
                     }
                 }
                 catch (final Exception e)
@@ -942,6 +948,7 @@ public class ThirdPartySyncService extends AbstractService
                         if (response.has("projectId") && record.getProjectId().equals(readString(response, "projectId")))
                         {
                             record.mergeProjectDetails(response);
+                            recomputeMaterialReserved(record);
                         }
                         else
                         {
@@ -1197,11 +1204,6 @@ public class ThirdPartySyncService extends AbstractService
         }
     }
 
-    public boolean isSuppressingAdvancedContainerScreen()
-    {
-        return !pendingAdvancedOpenContainerId.isBlank();
-    }
-
     public void setStorageZonePreview(final String projectId, final String dimension, final BlockPos firstCorner, final BlockPos secondCorner)
     {
         storageZonePreviewProjectId = projectId == null ? "" : projectId;
@@ -1416,32 +1418,25 @@ public class ThirdPartySyncService extends AbstractService
         final int radius = advancedMode ? advancedScanRadius(player) : Math.max(1, (int) Math.ceil(player.blockInteractionRange()));
         final BlockPos playerPos = player.blockPosition();
         boolean cacheChanged = false;
+        final Set<String> visitedThisTick = new HashSet<>();
 
         if (advancedMode)
         {
             advancedHits.entrySet().removeIf(entry -> nowMs - entry.getValue().scannedAt > Math.max(staleAfterMs, 30000));
+            pruneAdvancedContainerQueue(mc, dimension, nowMs);
         }
 
-        final Set<String> seenContainers = new HashSet<>();
         if (advancedMode)
         {
-            final int reachRadius = Math.max(1, (int) Math.ceil(player.blockInteractionRange()) + 1);
-            cacheChanged |= scanContainerCube(mc, player, dimension, playerPos, reachRadius, 0, Integer.MAX_VALUE, false, advancedMode, true, seenContainers, nowMs).cacheChanged;
+            cacheChanged |= pollAdvancedContainerQueue(mc, player, dimension, nowMs, visitedThisTick);
         }
 
-        final int side = radius * 2 + 1;
-        final int plane = side * side;
-        final int totalPositions = plane * side;
-        final int startIndex = advancedMode ? Math.floorMod(advancedScanCursorIndex, totalPositions) : 0;
-        final int positionBudget = advancedMode
-                ? Math.min(totalPositions, Math.max(128, Math.max(1, maxContainersPerCycle) * 512))
-                : totalPositions;
-        final ContainerScanBatch batch = scanContainerCube(mc, player, dimension, playerPos, radius, startIndex, positionBudget, advancedMode, advancedMode, false, seenContainers, nowMs);
+        final ContainerScanBatch batch = scanContainerCube(mc, player, dimension, playerPos, radius, advancedMode, visitedThisTick, nowMs);
         cacheChanged |= batch.cacheChanged;
 
         if (advancedMode)
         {
-            advancedScanCursorIndex = (startIndex + Math.max(1, batch.visited)) % totalPositions;
+            lastAdvancedPollMs = nowMs;
         }
 
         if (cacheChanged && store != null)
@@ -1451,32 +1446,27 @@ public class ThirdPartySyncService extends AbstractService
     }
 
     private ContainerScanBatch scanContainerCube(final Minecraft mc, final Player player, final String dimension, final BlockPos playerPos, final int radius,
-                                                final int startIndex, final int positionBudget, final boolean useCursor, final boolean advancedMode,
-                                                final boolean reachablePriorityPass, final Set<String> seenContainers, final long nowMs)
+                                                final boolean advancedMode, final Set<String> visitedThisTick, final long nowMs)
     {
         final int side = radius * 2 + 1;
         final int plane = side * side;
         final int totalPositions = plane * side;
         int visited = 0;
-        int scanned = 0;
         boolean cacheChanged = false;
-        final int budget = Math.min(totalPositions, Math.max(0, positionBudget));
+        final int budget = totalPositions;
+        final Set<String> seenContainers = new HashSet<>(visitedThisTick);
 
         for (; visited < budget; visited++)
         {
-            if (useCursor && scanned >= maxContainersPerCycle)
-            {
-                break;
-            }
-            final int scanIndex = useCursor ? (startIndex + visited) % totalPositions : visited;
+            final int scanIndex = visited;
             final int dx = scanIndex % side - radius;
             final int dy = (scanIndex / side) % side - radius;
             final int dz = scanIndex / plane - radius;
             final BlockPos pos = playerPos.offset(dx, dy, dz);
-            final ContainerScanResult result = processContainerAt(mc, player, dimension, pos, advancedMode, reachablePriorityPass, seenContainers, nowMs);
+            final ContainerScanResult result = processContainerAt(mc, player, dimension, pos, advancedMode, seenContainers, nowMs);
             if (result.processed)
             {
-                scanned++;
+                visitedThisTick.add(containerId(mc, dimension, pos));
             }
             cacheChanged |= result.cacheChanged;
         }
@@ -1484,23 +1474,105 @@ public class ThirdPartySyncService extends AbstractService
         return new ContainerScanBatch(visited, cacheChanged);
     }
 
+    private boolean pollAdvancedContainerQueue(final Minecraft mc, final Player player, final String dimension, final long nowMs, final Set<String> visitedThisTick)
+    {
+        if (mc == null || mc.level == null || mc.player == null || advancedContainerPollOrder.isEmpty())
+        {
+            return false;
+        }
+        if (!pendingAdvancedOpenContainerId.isBlank() || nowMs - lastAdvancedPollMs < advancedPollIntervalMs())
+        {
+            return false;
+        }
+
+        final int queueSize = advancedContainerPollOrder.size();
+        final int start = Math.floorMod(advancedContainerPollCursor, queueSize);
+        for (int i = 0; i < queueSize; i++)
+        {
+            final int index = (start + i) % queueSize;
+            final String containerId = advancedContainerPollOrder.get(index);
+            if (containerId == null || containerId.isBlank() || visitedThisTick.contains(containerId))
+            {
+                continue;
+            }
+
+            final ScannedPosition scanned = ScannedPosition.fromContainerId(containerId);
+            if (scanned == null || !dimension.equals(scanned.dimension))
+            {
+                removeAdvancedContainerFromQueue(containerId);
+                continue;
+            }
+
+            final BlockEntity blockEntity = mc.level.getBlockEntity(scanned.position);
+            if (!(blockEntity instanceof Container container))
+            {
+                removeAdvancedContainerFromQueue(containerId);
+                continue;
+            }
+            if (!isReachableContainer(player, scanned.position) || !shouldOpenContainerForSnapshot(containerId, nowMs))
+            {
+                continue;
+            }
+
+            final Map<String, Integer> contents;
+            final List<ItemStack> slotContents;
+            try
+            {
+                contents = collectContainerContents(mc, scanned.position, container);
+                slotContents = collectContainerStacks(mc, scanned.position, container);
+            }
+            catch (final Exception e)
+            {
+                recordScanFailure(containerId, dimension, scanned.position, e.getLocalizedMessage(), nowMs);
+                continue;
+            }
+
+            final BlockPos canonicalPos = canonicalContainerPos(mc, scanned.position);
+            updateScanCache(containerId, dimension, canonicalPos, Integer.toHexString(contents.hashCode()), nowMs);
+            advancedContainerSnapshots.put(containerId, contents);
+            if (!slotContents.isEmpty())
+            {
+                advancedContainerSlotSnapshots.put(containerId, copyStacks(slotContents));
+                advancedContainerOpenTimes.put(containerId, nowMs);
+            }
+            final Map<String, Integer> matches = findAdvancedMatches(contents, player.getName().getString());
+            if (!matches.isEmpty())
+            {
+                advancedHits.put(containerId, new AdvancedContainerHit(containerId, dimension, canonicalPos, matches, nowMs));
+            }
+            visitedThisTick.add(containerId);
+            advancedContainerPollCursor = (index + 1) % queueSize;
+            lastAdvancedPollMs = nowMs;
+            return true;
+        }
+
+        advancedContainerPollCursor = (start + 1) % queueSize;
+        return false;
+    }
+
     private ContainerScanResult processContainerAt(final Minecraft mc, final Player player, final String dimension, final BlockPos pos, final boolean advancedMode,
-                                                  final boolean reachablePriorityPass, final Set<String> seenContainers, final long nowMs)
+                                                  final Set<String> seenContainers, final long nowMs)
     {
         if (!advancedMode && !isWithinStorageActivationDistance(pos))
         {
             return ContainerScanResult.SKIPPED;
         }
 
+        final String containerId = containerId(mc, dimension, pos);
         final BlockEntity blockEntity = mc.level.getBlockEntity(pos);
         if (!(blockEntity instanceof Container container))
         {
+            if (advancedMode)
+            {
+                removeAdvancedContainerFromQueue(containerId);
+            }
             return ContainerScanResult.SKIPPED;
         }
 
         final boolean reachable = isReachableContainer(player, pos);
-        if (reachablePriorityPass && !reachable)
+        if (!reachable && advancedMode)
         {
+            queueAdvancedContainer(containerId, canonicalContainerPos(mc, pos), dimension, false);
             return ContainerScanResult.SKIPPED;
         }
 
@@ -1510,7 +1582,6 @@ public class ThirdPartySyncService extends AbstractService
             return ContainerScanResult.SKIPPED;
         }
 
-        final String containerId = containerId(mc, dimension, pos);
         if (!seenContainers.add(containerId) || isContainerInCooldown(containerId, nowMs))
         {
             return ContainerScanResult.SKIPPED;
@@ -1547,6 +1618,7 @@ public class ThirdPartySyncService extends AbstractService
                 advancedContainerSnapshots.put(containerId, contents);
                 advancedContainerSlotSnapshots.put(containerId, slotContents);
             }
+            queueAdvancedContainer(containerId, canonicalContainerPos(mc, pos), dimension, !slotContents.isEmpty());
             final Map<String, Integer> advancedContents = contents.isEmpty() && hasCachedSnapshot
                     ? advancedContainerSnapshots.get(containerId)
                     : contents;
@@ -1564,6 +1636,76 @@ public class ThirdPartySyncService extends AbstractService
         return new ContainerScanResult(true, cacheChanged);
     }
 
+    private void queueAdvancedContainer(final String containerId, final BlockPos canonicalPos, final String dimension, final boolean hasSnapshot)
+    {
+        if (containerId == null || containerId.isBlank())
+        {
+            return;
+        }
+        if (!advancedContainerPollOrder.contains(containerId))
+        {
+            advancedContainerPollOrder.add(containerId);
+        }
+        advancedContainerOpenTimes.putIfAbsent(containerId, System.currentTimeMillis());
+        if (hasSnapshot && canonicalPos != null)
+        {
+            advancedHits.putIfAbsent(containerId, new AdvancedContainerHit(containerId, dimension, canonicalPos.immutable(), Collections.emptyMap(), System.currentTimeMillis()));
+        }
+    }
+
+    private void removeAdvancedContainerFromQueue(final String containerId)
+    {
+        if (containerId == null || containerId.isBlank())
+        {
+            return;
+        }
+        final int removedIndex = advancedContainerPollOrder.indexOf(containerId);
+        if (removedIndex >= 0)
+        {
+            advancedContainerPollOrder.remove(removedIndex);
+            if (advancedContainerPollCursor > removedIndex)
+            {
+                advancedContainerPollCursor--;
+            }
+            if (advancedContainerPollOrder.isEmpty())
+            {
+                advancedContainerPollCursor = 0;
+            }
+            else
+            {
+                advancedContainerPollCursor = Math.floorMod(advancedContainerPollCursor, advancedContainerPollOrder.size());
+            }
+        }
+        advancedContainerSnapshots.remove(containerId);
+        advancedContainerSlotSnapshots.remove(containerId);
+        advancedContainerOpenTimes.remove(containerId);
+        advancedHits.remove(containerId);
+    }
+
+    private void pruneAdvancedContainerQueue(final Minecraft mc, final String dimension, final long nowMs)
+    {
+        for (int i = advancedContainerPollOrder.size() - 1; i >= 0; i--)
+        {
+            final String containerId = advancedContainerPollOrder.get(i);
+            final ScannedPosition scanned = ScannedPosition.fromContainerId(containerId);
+            if (scanned == null || !dimension.equals(scanned.dimension))
+            {
+                removeAdvancedContainerFromQueue(containerId);
+                continue;
+            }
+            final BlockEntity blockEntity = mc.level.getBlockEntity(scanned.position);
+            if (!(blockEntity instanceof Container))
+            {
+                removeAdvancedContainerFromQueue(containerId);
+            }
+        }
+    }
+
+    private long advancedPollIntervalMs()
+    {
+        return Math.max(90L, Math.min(280L, Math.max(advancedSafeActionIntervalMs, 450) / 8L));
+    }
+
     private boolean shouldOpenContainerForSnapshot(final String containerId, final long nowMs)
     {
         if (!advancedStockingEnabled || containerId == null || containerId.isBlank())
@@ -1579,7 +1721,7 @@ public class ThirdPartySyncService extends AbstractService
                 && advancedContainerSlotSnapshots.containsKey(containerId)
                 && !advancedContainerSlotSnapshots.getOrDefault(containerId, Collections.emptyList()).isEmpty();
         if (hasConfirmedSlotSnapshot
-                && nowMs - lastContainerOpenMs < Math.max(30000L, Math.max(advancedSafeActionIntervalMs, advancedScanIntervalMs) * 5L))
+                && nowMs - lastContainerOpenMs < Math.max(1200L, Math.max(advancedSafeActionIntervalMs, advancedScanIntervalMs)))
         {
             return false;
         }
@@ -1588,15 +1730,15 @@ public class ThirdPartySyncService extends AbstractService
 
     private long advancedOpenDelayMs()
     {
-        final long base = Math.max(800, advancedSafeActionIntervalMs);
-        final long jitter = Math.abs(System.nanoTime() % Math.max(1, base / 3));
+        final long base = Math.max(160L, Math.min(700L, Math.max(advancedSafeActionIntervalMs, 320) / 5L));
+        final long jitter = Math.abs(System.nanoTime() % Math.max(1L, base / 6L));
         if (isAdvancedV2())
         {
             return base + jitter;
         }
         if (isAdvancedV3())
         {
-            return advancedAutoTakeArmed ? Math.max(250, base / 2) + jitter : base + jitter;
+            return advancedAutoTakeArmed ? Math.max(140L, base / 2L) + jitter : base + jitter;
         }
         return base + jitter;
     }
@@ -1712,19 +1854,9 @@ public class ThirdPartySyncService extends AbstractService
         {
             return;
         }
-        try
+        if (mc.player.containerMenu != null && hasExternalContainerSlots(mc.player.getInventory(), mc.player.containerMenu.slots))
         {
-            if (mc.player.containerMenu != null && hasExternalContainerSlots(mc.player.getInventory(), mc.player.containerMenu.slots))
-            {
-                mc.player.closeContainer();
-            }
-        }
-        finally
-        {
-            if (mc.screen instanceof AbstractContainerScreen<?>)
-            {
-                mc.setScreen(null);
-            }
+            mc.player.closeContainer();
         }
     }
 
@@ -1938,9 +2070,9 @@ public class ThirdPartySyncService extends AbstractService
         {
             return 0;
         }
-        final int maxMoves = isAdvancedV3() ? Math.min(8, Math.max(1, maxContainersPerCycle)) : 1;
-        int moved = 0;
         final List<Slot> slots = mc.player.containerMenu.slots;
+        final int maxMoves = slots.size();
+        int moved = 0;
         for (int slotId = 0; slotId < slots.size(); slotId++)
         {
             if (moved >= maxMoves)
@@ -3034,6 +3166,7 @@ public class ThirdPartySyncService extends AbstractService
             final JsonObject response = apiClient.getProject(record.getProjectId());
             record.mergeProjectDetails(response);
             mergeServerPlacement(record, response);
+            recomputeMaterialReserved(record);
             notifyThirdPartyConnectionSucceeded();
         }
         catch (final Exception e)
@@ -3052,6 +3185,7 @@ public class ThirdPartySyncService extends AbstractService
                 notifyThirdPartyConnectionSucceeded();
                 record.mergeProjectDetails(response);
                 mergeServerPlacement(record, response);
+                recomputeMaterialReserved(record);
                 if (response.has("projectId"))
                 {
                     record.setProjectId(response.get("projectId").getAsString());
@@ -3072,6 +3206,7 @@ public class ThirdPartySyncService extends AbstractService
                 notifyThirdPartyConnectionSucceeded();
                 record.mergeProjectDetails(response);
                 mergeServerPlacement(record, response);
+                recomputeMaterialReserved(record);
                 record.setPendingCollected(false);
                 record.setStatus(ThirdPartyProjectRecord.STATUS_SYNCED);
                 record.setLastSyncMessage("");
@@ -3312,6 +3447,7 @@ public class ThirdPartySyncService extends AbstractService
                 final JsonObject response = apiClient.upsertClaim(projectId, body);
                 notifyThirdPartyConnectionSucceeded();
                 record.mergeProjectDetails(response);
+                recomputeMaterialReserved(record);
             }
             catch (final Exception e)
             {

@@ -311,7 +311,7 @@ async function handle(req, res) {
     const body = await readBody(req);
     const materialKey = String(body.materialKey || "");
     const assignee = authName(req, body);
-    const targetAmount = Math.max(0, Number(body.targetAmount || 0));
+    const targetAmount = Math.max(0, Math.floor(Number(body.targetAmount || 0)));
     const existing = project.claims.find(claim =>
       (body.claimId && claim.claimId === body.claimId) ||
       (claim.materialKey === materialKey && claim.assignee.toLowerCase() === assignee.toLowerCase())
@@ -323,6 +323,27 @@ async function handle(req, res) {
         claimProject.delete(existing.claimId);
       }
       json(res, 200, publicProject(project));
+      return;
+    }
+
+    const material = project.materials.find(item => item.materialKey === materialKey);
+    if (!material) {
+      json(res, 400, { error: "material not found" });
+      return;
+    }
+    const collected = Object.prototype.hasOwnProperty.call(project.collected, materialKey)
+      ? Number(project.collected[materialKey] || 0)
+      : Number(material.collected || 0);
+    const otherReserved = project.claims
+      .filter(claim => claim.materialKey === materialKey && (!existing || claim.claimId !== existing.claimId))
+      .reduce((sum, claim) => sum + Number(claim.targetAmount || 0), 0);
+    const maxClaimable = Math.max(0, Number(material.required || 0) - collected - otherReserved);
+    if (targetAmount > maxClaimable) {
+      json(res, 409, {
+        error: "claim amount exceeds remaining material amount",
+        remaining: maxClaimable,
+        project: publicProject(project)
+      });
       return;
     }
 

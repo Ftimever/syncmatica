@@ -15,17 +15,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(AbstractContainerScreen.class)
 public class MixinAbstractContainerScreen
 {
-    @Inject(method = "extractRenderState", at = @At("HEAD"), cancellable = true)
-    private void syncmatica$suppressAdvancedStockingContainerScreen(final GuiGraphicsExtractor gui, final int mouseX, final int mouseY, final float partialTicks, final CallbackInfo ci)
-    {
-        final Context context = Syncmatica.getContext(Syncmatica.CLIENT_CONTEXT);
-        if (context != null && context.getThirdPartySyncService() != null
-                && context.getThirdPartySyncService().isSuppressingAdvancedContainerScreen())
-        {
-            ci.cancel();
-        }
-    }
-
     @Inject(method = "extractSlot", at = @At("RETURN"))
     private void syncmatica$highlightClaimedStockingItems(final GuiGraphicsExtractor gui, final Slot slot, final int slotX, final int slotY, final CallbackInfo ci)
     {
